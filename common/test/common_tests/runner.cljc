@@ -92,6 +92,7 @@
    [common-tests.logic.token-test]
    [common-tests.logic.variants-paste-test]
    [common-tests.logic.variants-reparent-test]
+   [common-tests.logic.variant-properties-test]
    [common-tests.logic.variants-switch-test]
    [common-tests.logic.variants-test]
    [common-tests.math-test]
@@ -218,6 +219,7 @@
    'common-tests.logic.token-test
    'common-tests.logic.variants-paste-test
    'common-tests.logic.variants-reparent-test
+   'common-tests.logic.variant-properties-test
    'common-tests.logic.variants-switch-test
    'common-tests.logic.variants-test
    'common-tests.math-test
