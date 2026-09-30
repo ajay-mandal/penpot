@@ -1290,6 +1290,10 @@
   [changes]
   (contains? (meta changes) ::page))
 
+(defn has-page-id?
+  [changes]
+  (contains? (meta changes) ::page-id))
+
 (defn set-text-content
   [changes id content prev-content]
   (assert-page-id! changes)
