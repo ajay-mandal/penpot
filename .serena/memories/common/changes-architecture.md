@@ -19,6 +19,12 @@ Each transaction carries `:redo-changes` and inverse `:undo-changes`. The undo s
 `common/src/app/common/files/changes_merge.cljc` (alias `mch`) rewrites a finished batch into an equivalent smaller one, without touching file data.
 - `mch/merge-reg-objects`: the component sync emits one `:reg-objects` per touched shape, so a component swap carries hundreds of them for a handful of groups. It collapses them into one per container, union of `:shapes`, moved to the end of the batch so a group is always recomputed after the shapes that resized it. Applied to both redo and undo, on every commit (`frontend/src/app/main/data/changes.cljs`) and again within each buffered commit before queueing (`frontend/src/app/main/data/persistence.cljs`). Keep commits separate: the backend can reject them by `commit-id`, so persistence must not fuse changes across commit boundaries. Measured on a real swap: 291 `:reg-objects` become 36, the whole batch goes 806 changes / 6.4 MB to 551 / 324 KB.
 
+## Persistence
+
+The editor saves through `update-file-v2`: it sends `:commits` in edit order, one entry per commit with `:commit-id`, `:redo-changes` and `:undo-changes`. A revision payload (`file_data`, type `revision`) holds only the accepted prefix: redo in edit order, undo newest commit first, preserving each commit's list order. `file_change.changes` still carries the accepted redo. The stored undo comes from the editor; it need not restore the server's prior state under concurrent edits or a retry after a lost response. This does not restore the editor's undo history on reload. The request schema is closed: old keys (`:changes`, `:changes-with-metadata`, top-level `:undo-changes`) are rejected. See `mem:backend/subtleties` for how the server selects the prefix.
+
+The deprecated `update-file` remains for old clients: it accepts flat `:changes` or `:changes-with-metadata` groups (partial saves require a `:commit-id` in every group) and stores empty undo. The current editor does not fall back to it.
+
 ## changes-builder API
 
 `common/src/app/common/files/changes_builder.cljc` (usually alias `pcb`) is the fluent builder. Start from `(pcb/empty-changes <it> <page-id>)` or `(pcb/empty-changes nil <page-id>)` for tests.
