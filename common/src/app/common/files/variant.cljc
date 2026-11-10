@@ -133,6 +133,13 @@
          (not= (ctv/properties-to-name props)
                (:variant-name shape)))))
 
+(defn variant-props-changed?
+  "True when the stored `:variant-properties` of `component` differ from
+   `props`. A missing property list counts as empty."
+  [component props]
+  (not= (vec (or (:variant-properties component) []))
+        (vec props)))
+
 (defn- qualifying-variant-member
   [data objects container child-id]
   (when-let [child (get objects child-id)]
@@ -168,21 +175,26 @@
                 (ctv/properties-to-name props))
       data)))
 
+(defn get-variant-members-props
+  "Return the qualifying members of `container` in layers-panel order
+   (top first, the reverse of `:shapes`). Each member also gets `:props`,
+   its vector in the result of `f` over all their property vectors. `f`
+   takes and returns a vector of property vectors."
+  [data objects container f]
+  (let [members   (vec (rseq (qualifying-variant-members data objects container)))
+        props-seq (f (mapv #(vec (or (get-in % [:component :variant-properties]) []))
+                           members))]
+    (mapv #(assoc %1 :props %2) members props-seq)))
+
 (defn update-variant-container-properties
   "Apply `f` to the property vectors of the members of `container`, in
-   layers-panel order (top first, the reverse of `:shapes`), and write each
-   result with `update-variant-properties`. `f` takes and returns a vector
-   of property vectors."
+   layers-panel order, and write each result with
+   `update-variant-properties`. See `get-variant-members-props`."
   [data objects container f]
-  (let [components (->> (qualifying-variant-members data objects container)
-                        (map :component)
-                        (reverse)
-                        (vec))
-        props-seq  (f (mapv #(vec (or (:variant-properties %) [])) components))]
-    (reduce (fn [data [component props]]
-              (update-variant-properties data component (constantly props)))
-            data
-            (map vector components props-seq))))
+  (reduce (fn [data {:keys [component props]}]
+            (update-variant-properties data component (constantly props)))
+          data
+          (get-variant-members-props data objects container f)))
 
 (defn sanitize-variant-component
   "Sanitize the properties of one variant component on its own."
