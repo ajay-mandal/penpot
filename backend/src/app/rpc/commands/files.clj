@@ -518,7 +518,9 @@
         (prune-objects object-id)
 
         (some? tokens)
-        (assoc :tokens tokens)
+        (assoc :tokens tokens
+               ;; The rem base the tokens resolve with
+               :base-font-size (ctf/get-base-font-size (:data file)))
 
         (some? resolved)
         (assoc :tokens-resolved resolved)

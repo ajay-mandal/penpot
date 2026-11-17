@@ -86,7 +86,8 @@
         (fn [{:keys [page] :as data}]
           (->> (rx/from (ctr/resolve-for-reader (:tokens page)
                                                 (:tokens-resolved page)
-                                                (not (contains? cf/flags :tokenscript))))
+                                                {:tokenscript? (contains? cf/flags :tokenscript)
+                                                 :base-font-size (:base-font-size page)}))
                (rx/mapcat
                 (fn [resolved]
                   (if (and strip-frames-with-thumbnails

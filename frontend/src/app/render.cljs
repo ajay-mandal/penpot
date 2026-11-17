@@ -158,7 +158,8 @@
   [page params object-ids]
   (->> (rx/from (ctr/resolve-for-reader (:tokens page)
                                         (:tokens-resolved page)
-                                        (not (contains? cf/flags :tokenscript))))
+                                        {:tokenscript? (contains? cf/flags :tokenscript)
+                                         :base-font-size (:base-font-size page)}))
        (rx/mapcat
         (fn [resolved]
           (if (and (not (:tokens-out-of-date page))

@@ -190,7 +190,8 @@
           (fn [page]
             (->> (ctr/resolve-for-reader (:tokens page)
                                          (:tokens-resolved page)
-                                         (not (contains? cf/flags :tokenscript)))
+                                         {:tokenscript? (contains? cf/flags :tokenscript)
+                                          :base-font-size (:base-font-size page)})
                  (p/mcat
                   (fn [resolved]
                     (let [refetch? (and (seq root-ids)

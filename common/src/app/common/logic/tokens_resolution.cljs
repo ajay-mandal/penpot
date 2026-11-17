@@ -15,9 +15,11 @@
    ["@tokens-studio/sd-transforms" :as sd-transforms]
    ["style-dictionary$default" :as sd]
    ["tinycolor2$default" :as tinycolor]
+   [app.common.data :as d]
    [app.common.files.tokens :as cfo]
    [app.common.logging :as l]
    [app.common.logic.tokens-propagation :as cltp]
+   [app.common.logic.tokenscript :as cts]
    [app.common.types.token :as cto]
    [app.common.types.tokens-lib :as ctob]
    [cuerdas.core :as str]
@@ -684,16 +686,26 @@
   (and (empty? (:errors token))
        (some? (:resolved-value token))))
 
+(defn- resolve-with
+  "Promise of `tokens` resolved with tokenscript or with StyleDictionary."
+  [tokens tokenscript? base-font-size]
+  (if tokenscript?
+    (p/do (binding [cts/*base-font-size* (d/parse-double base-font-size 16)]
+            (cts/resolve-tokens tokens)))
+    (resolve-tokens tokens)))
+
 (defn resolve-for-reader
   "Promise of the resolved tokens a reader sets its shapes with: `tokens`,
   the tokens its pages use (a map of name to `{:name :type :value}`),
-  resolved. A token that doesn't resolve takes its value in `saved`, the
-  values saved in the file by the editors, and only those are used when
-  the resolution fails or `resolve?` is false."
-  [tokens saved resolve?]
+  resolved with the same resolver as the workspace (`:tokenscript?`) and,
+  with tokenscript, the file's `:base-font-size` as the rem base. A token
+  that doesn't resolve takes its value in `saved`, the values saved in the
+  file by the editors, and only those are used when the resolution
+  fails."
+  [tokens saved {:keys [tokenscript? base-font-size]}]
   (let [fallback (cltp/values->resolved-tokens saved)]
-    (if (and resolve? (seq tokens))
-      (-> (resolve-tokens tokens)
+    (if (seq tokens)
+      (-> (resolve-with tokens tokenscript? base-font-size)
           (p/then (fn [resolved]
                     (into fallback (filter (comp resolved? val)) resolved)))
           (p/catch (fn [cause]

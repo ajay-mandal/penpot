@@ -16,6 +16,7 @@
    [app.common.schema :as sm]
    [app.common.thumbnails :as thc]
    [app.common.time :as ct]
+   [app.common.types.file :as ctf]
    [app.common.types.objects-map :as omap]
    [app.common.types.shape-tree :as ctt]
    [app.config :as cf]
@@ -186,7 +187,9 @@
           ;; The tokens of the page and their values saved by the editors,
           ;; so the thumbnail sets the shapes that are out of date
           (some? tokens)
-          (assoc :tokens tokens)
+          (assoc :tokens tokens
+                 ;; The rem base the tokens resolve with
+                 :base-font-size (ctf/get-base-font-size data))
 
           (some? (:tokens-resolved data))
           (assoc :tokens-resolved (cfo/get-pages-resolved data [page]))
