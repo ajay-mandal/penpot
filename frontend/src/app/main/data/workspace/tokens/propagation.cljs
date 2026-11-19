@@ -28,6 +28,7 @@
    [app.main.data.changes :as dch]
    [app.main.data.helpers :as dsh]
    [app.main.data.persistence :as-alias dps]
+   [app.main.data.persistence.lock :as plk]
    [app.main.data.workspace.thumbnails :as dwt]
    [app.main.data.workspace.tokens.application :as dwta]
    [app.main.data.workspace.tokens.lookup :as lookup]
@@ -171,15 +172,17 @@
   them when `changed` is nil. With `:thumbnails-only?` no shape is set: the
   page is set when it is opened or read, and the thumbnails of its frames
   `frame-ids` and main components `main-ids` that are left out of date are
-  cleared. With `:background?` the commit is not undoable."
+  cleared. With `:background?` the commit is not undoable. Without `changes`
+  the commit only follows the tokens, so it goes through while saves fail."
   [it state resolved-tokens changed
    {:keys [page-id root-ids changes save-resolved? thumbnails-only? main-ids frame-ids drain? background?]
     scope-targets :targets} tags]
-  (let [file-id (get state :current-file-id)
-        page    (dsh/lookup-page state file-id page-id)
-        objects (:objects page)
-        other?  (not= page-id (get state :current-page-id))
-        saved   (:tokens-resolved (dsh/lookup-file-data state file-id))
+  (let [derived? (nil? changes)
+        file-id  (get state :current-file-id)
+        page     (dsh/lookup-page state file-id page-id)
+        objects  (:objects page)
+        other?   (not= page-id (get state :current-page-id))
+        saved    (:tokens-resolved (dsh/lookup-file-data state file-id))
 
         targets
         (cond
@@ -223,7 +226,7 @@
         (keep #(when (= :mod-obj (:type %)) (:id %)) (:redo-changes changes))]
 
     (rx/concat
-     (dwta/commit-token-values state changes page-id objects targets)
+     (dwta/commit-token-values state changes page-id objects targets derived?)
      (clear-thumbnails file-id page-id objects changed-ids nil)
      (if thumbnails-only?
        (stale-thumbnails file-id page-id objects frame-ids main-ids changed)
@@ -485,9 +488,17 @@
 
             propagate
             (fn [[resolved-tokens changed]]
-              (if (and (some? changed) (empty? changed))
+              (cond
+                ;; While saves fail the change of the user is refused, and
+                ;; with it the values of every page
+                (and (some? changes) (plk/locked? state))
+                (rx/empty)
+
+                (and (some? changed) (empty? changed))
                 ;; Nothing to set; the changes of tokens still go
                 (or commit-changes (rx/empty))
+
+                :else
                 (let [undo-id (js/Symbol)
                       tpoint  (ct/tpoint-ms)
                       scopes  (if (some? root-ids)
