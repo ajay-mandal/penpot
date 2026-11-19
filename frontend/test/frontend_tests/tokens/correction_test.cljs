@@ -793,6 +793,9 @@
 (t/deftest a-refused-token-change-sets-no-other-page
   (t/async done (refused-change-sets-no-page done #{})))
 
+(t/deftest a-refused-lazy-token-change-drains-no-page
+  (t/async done (refused-change-sets-no-page done #{:lazy-token-propagation :lazy-token-propagation-drain})))
+
 (t/deftest lazy-changes-set-only-the-current-page
   (t/async
     done
@@ -829,29 +832,6 @@
               (rx/filter #(and (ptk/type? ::dwtc/tokens-ready %)
                                (= page2 (:page-id (deref %)))))
               (rx/take 1)))))))
-
-(t/deftest lazy-changes-drain-the-other-pages
-  (t/async
-    done
-    (let [restore (with-lazy-flag)
-          file    (setup-file-with-pages)
-          store   (ths/setup-store file)
-          token   (ctob/get-token (ctht/get-tokens-lib file) (cthi/id :set) (cthi/id :radius))
-          other   (cthi/id :other)
-          commits (watch-commits store)]
-      (tohs/run-store
-       store done [(dwtl/update-token (cthi/id :set) (cthi/id :radius) (assoc token :value 70))]
-       (fn [state]
-         (restore)
-         (t/is (= 70 (:r1 (cths/get-shape (ths/get-file-from-state state) :other :page-label :page2)))
-               "the other page is set in the background")
-         (t/is (false? (:save-undo? (last @commits))) "not undoable"))
-       (fn [stream]
-         (->> stream
-              (rx/filter dch/commit?)
-              (rx/filter #(some (fn [change] (= other (:id change))) (:redo-changes (deref %))))
-              (rx/take 1)
-              (rx/delay 10)))))))
 
 (t/deftest the-change-is-saved-and-the-other-pages-are-not
   (t/async
@@ -1019,55 +999,6 @@
                "the frame waits to be set")
          (t/is (not (contains? (:thumbnails state) (thumb :other))) "its thumbnail goes")
          (t/is (contains? (:thumbnails state) (thumb :plain)) "a frame without the token keeps it"))))))
-
-(t/deftest the-drain-saves-the-change-and-each-page-at-once
-  (t/async
-    done
-    (let [pause   dwtp/drain-delay-ms
-          _       (set! dwtp/drain-delay-ms 1)
-          restore #(set! dwtp/drain-delay-ms pause)
-          stream  (rx/subject)
-          events  (atom [])
-          persist :app.main.data.persistence/force-persist
-          drain   (#'dwtp/drain-pages {} {} [(uuid/next) (uuid/next)])]
-      (rx/subs!
-       (fn [event]
-         (swap! events conj (if (= persist event) :persist :page))
-         (when (ptk/type? ::dwtp/drain-scope event)
-           ;; the page is set
-           (rx/push! stream (ptk/data-event ::dwtp/page-done {:scope-id (deref event)}))))
-       (fn [cause] (restore) (t/is (nil? cause)) (done))
-       (fn []
-         (restore)
-         (t/is (= [:persist :page :persist :page :persist] @events)
-               "the change before the drain, and each page right after it is set")
-         (done))
-       (ptk/watch drain {} stream)))))
-
-(t/deftest the-drain-stops-when-the-tokens-change
-  (t/async
-    done
-    (let [pause   dwtp/drain-delay-ms
-          _       (set! dwtp/drain-delay-ms 1)
-          restore #(set! dwtp/drain-delay-ms pause)
-          stream  (rx/subject)
-          events  (atom [])
-          persist :app.main.data.persistence/force-persist
-          drain   (#'dwtp/drain-pages {} {} [(uuid/next) (uuid/next)])]
-      (rx/subs!
-       (fn [event]
-         (swap! events conj (if (= persist event) :persist :page))
-         (when (ptk/type? ::dwtp/drain-scope event)
-           (rx/push! stream (ptk/data-event ::dwtp/page-done {:scope-id (deref event)}))
-           ;; an undo of the change, once the first page is set
-           (rx/push! stream (ptk/data-event ::dch/commit {:redo-changes [{:type :set-token}]}))))
-       (fn [cause] (restore) (t/is (nil? cause)) (done))
-       (fn []
-         (restore)
-         (t/is (= [:persist :page :persist] @events)
-               "the second page is left for the editors and readers")
-         (done))
-       (ptk/watch drain {} stream)))))
 
 (t/deftest nested-mains-lose-their-thumbnail
   (let [[container main rect other] (repeatedly 4 uuid/next)

@@ -11,7 +11,6 @@
   shape holds another value than its token resolves to, the stale ones and
   the unassigned ones (§ `app.common.types.token-values`)."
   (:require
-   [app.common.data :as d]
    [app.common.data.macros :as dm]
    [app.common.files.changes :as cfc]
    [app.common.files.changes-builder :as pcb]
@@ -21,8 +20,6 @@
    [app.common.logic.tokens-propagation :as cltp]
    [app.common.thumbnails :as thc]
    [app.common.time :as ct]
-   [app.common.types.component :as ctk]
-   [app.common.types.token-values :as cttv]
    [app.common.uuid :as uuid]
    [app.config :as cf]
    [app.main.data.changes :as dch]
@@ -31,7 +28,9 @@
    [app.main.data.persistence.lock :as plk]
    [app.main.data.workspace.thumbnails :as dwt]
    [app.main.data.workspace.tokens.application :as dwta]
+   [app.main.data.workspace.tokens.drain :as drain]
    [app.main.data.workspace.tokens.lookup :as lookup]
+   [app.main.data.workspace.tokens.page-values :as pv]
    [app.main.data.workspace.tokens.progress :as dwtpr]
    [app.main.data.workspace.undo :as dwu]
    [app.main.fonts :as fonts]
@@ -46,51 +45,23 @@
 
 ;; Targets ---------------------------------------------------------------------
 
-(defn out-of-date-targets
-  "Targets for `cltp/generate-token-propagation` with the token attributes
-  of the shapes `ids` of `objects` that are out of date with
-  `resolved-tokens`; unassigned ones too, unless `unassigned?` is false."
-  ([objects ids resolved-tokens]
-   (out-of-date-targets objects ids resolved-tokens true))
-  ([objects ids resolved-tokens unassigned?]
-   (into {}
-         (keep (fn [id]
-                 (when-let [shape (get objects id)]
-                   (let [attrs (cttv/out-of-date-attrs shape resolved-tokens {:unassigned? unassigned?})]
-                     (when (seq attrs) [id attrs])))))
-         ids)))
+(def out-of-date-targets pv/out-of-date-targets)
+
+(defn- token-names
+  "Names of the `changed` tokens, nil for any token."
+  [changed]
+  (when (some? changed) (vec (keys changed))))
 
 (defn- candidate-ids
   "Ids of the shapes of `objects` that may be out of date: the ones that
   apply some of the `changed` tokens, or every shape with tokens when
   `changed` is nil."
   [objects changed]
-  (if (some? changed)
-    (lookup/shapes-using objects (keys changed))
-    (into #{} cat (vals (lookup/token-shape-ids objects)))))
+  (pv/candidate-ids objects (token-names changed)))
 
-(defn root-frame-ids
-  "Ids of the root frames that hold the shapes `ids` of `objects`."
-  [objects ids]
-  (into #{}
-        (keep (fn [id]
-                (->> (cfh/get-parent-ids objects id)
-                     (cons id)
-                     (take-while #(not= % uuid/zero))
-                     (map (d/getf objects))
-                     (d/seek cfh/root-frame?)
-                     :id)))
-        ids))
+(def root-frame-ids pv/root-frame-ids)
 
-(defn main-instance-ids
-  "Ids of the main components that hold the shapes `ids` of `objects`, at
-  any depth: their thumbnails are kept by that id."
-  [objects ids]
-  (into #{}
-        (comp (mapcat #(cfh/get-parent-ids-seq-with-self objects %))
-              (distinct)
-              (filter #(ctk/main-instance? (get objects %))))
-        ids))
+(def main-instance-ids pv/main-instance-ids)
 
 (defn clear-thumbnails
   "Clear the thumbnails of the root frames and the main components that
@@ -175,7 +146,7 @@
   cleared. With `:background?` the commit is not undoable. Without `changes`
   the commit only follows the tokens, so it goes through while saves fail."
   [it state resolved-tokens changed
-   {:keys [page-id root-ids changes save-resolved? thumbnails-only? main-ids frame-ids drain? background?]
+   {:keys [page-id root-ids changes save-resolved? thumbnails-only? main-ids frame-ids background?]
     scope-targets :targets} tags]
   (let [derived? (nil? changes)
         file-id  (get state :current-file-id)
@@ -202,25 +173,18 @@
           :else
           (out-of-date-targets objects (candidate-ids objects changed) resolved-tokens))
 
-        background
-        (let [color (cltp/page-background page resolved-tokens)]
-          (when (and (some? color) (not= color (:background page)))
-            color))
-
         changes
         (-> (or changes (pcb/empty-changes it))
-            (pcb/with-page page)
-            (cltp/generate-token-propagation objects resolved-tokens targets
-                                             {:fonts @fonts/fontsdb
-                                              :geometry (dwta/geometry-mode state page-id)
-                                              :reset-position-data? other?})
-            (cond-> (some? background) (pcb/mod-page page {:background background}))
+            (pv/page-propagation page resolved-tokens targets
+                                 {:fonts @fonts/fontsdb
+                                  :geometry (dwta/geometry-mode state page-id)
+                                  :reset-position-data? other?})
             ;; The readers set their shapes with the values saved in the file
             (cond-> save-resolved?
               (pcb/set-tokens-resolved saved (cltp/values-to-save resolved-tokens saved)))
             (cond-> (seq tags) (update :tags (fnil into #{}) tags))
             ;; Work in the background is not something to undo
-            (cond-> (or drain? background?) (pcb/set-save-undo? false)))
+            (cond-> background? (pcb/set-save-undo? false)))
 
         changed-ids
         (keep #(when (= :mod-obj (:type %)) (:id %)) (:redo-changes changes))]
@@ -235,9 +199,7 @@
 (defn- page-affected?
   "True when `page` may have something to set for the `changed` tokens."
   [page changed]
-  (or (nil? changed)
-      (some? (:background-token page))
-      (seq (candidate-ids (:objects page) changed))))
+  (pv/page-affected? page (token-names changed)))
 
 (defn- page-scopes
   "Scopes that cover the pages of the file that may have something to
@@ -301,14 +263,13 @@
     (watch [it state stream]
       (let [whole?  (and (nil? (:targets scope))
                          (not (:thumbnails-only? scope))
-                         (nil? (:root-ids scope))
-                         (not (:drain? scope)))
+                         (nil? (:root-ids scope)))
             objects (when whole? (:objects (dsh/lookup-page state (:page-id scope))))
             targets (when whole?
                       (out-of-date-targets objects (candidate-ids objects changed) resolved-tokens))]
         (cond
           ;; The work in the background waits for a pause of the user
-          (and (or (:background? scope) (:drain? scope))
+          (and (:background? scope)
                (not (::waited? scope)))
           (->> (wait-for-user state stream)
                (rx/map #(propagate-scope resolved-tokens changed (assoc scope ::waited? true)
@@ -385,77 +346,7 @@
     (update [_ state]
       (update state ::running disj run-id))))
 
-(def token-change-types
-  "Types of the changes that may change the value of a token."
-  #{:set-tokens-lib :set-token :set-token-set :set-token-theme
-    :rename-token-set-group :move-token-set :move-token-set-group
-    :set-tokens-status :set-own-tokens-status :set-tokens-source
-    :set-base-font-size})
-
-(defn- tokens-commit?
-  "True when `event` commits a change of the tokens."
-  [event]
-  (and (dch/commit? event)
-       (some #(contains? token-change-types (:type %))
-             (:redo-changes (deref event)))))
-
-(def drain-delay-ms
-  "Pause before setting each page left out of date by a lazy change, so the
-  work goes in the background."
-  2000)
-
-(defn- drain-scope
-  "Set `page-id` after a pause when it has something to set for the
-  `changed` tokens; otherwise the page is done at once."
-  [resolved-tokens changed page-id scope-id]
-  (ptk/reify ::drain-scope
-    cljs.core/IDeref
-    (-deref [_] scope-id)
-
-    ptk/WatchEvent
-    (watch [_ state _]
-      (if (page-affected? (dsh/lookup-page state page-id) changed)
-        (->> (rx/of (propagate-scope resolved-tokens changed
-                                     {:page-id page-id :drain? true}
-                                     #{:token-propagation}
-                                     scope-id))
-             (rx/delay drain-delay-ms))
-        (rx/of (page-done scope-id))))))
-
-(defn- drain-page
-  "Set `page-id` after a pause and save it as soon as it is set."
-  [stream resolved-tokens changed page-id]
-  (let [scope-id (uuid/next)]
-    (rx/concat
-     (rx/merge
-      (->> stream
-           (rx/filter (partial page-done? scope-id))
-           (rx/take 1)
-           (rx/map (constantly ::dps/force-persist)))
-      (rx/of (drain-scope resolved-tokens changed page-id scope-id)))
-     (rx/ignore (tm/next-task)))))
-
-(defn- drain-pages
-  "Set, one after another and in the background, the pages that a lazy
-  change of the tokens left out of date, so the readers don't have to set
-  them every time. Stops when the tokens change again (another
-  propagation, an undo, a remote change) or the workspace closes.
-
-  The change and each page are saved as soon as they are set: the drain
-  commits more often than the persistence waits for a pause."
-  [resolved-tokens changed page-ids]
-  (ptk/reify ::drain-pages
-    ptk/WatchEvent
-    (watch [_ _ stream]
-      (let [stopper (rx/filter #(or (contains? #{::propagate-workspace-tokens
-                                                 :app.main.data.workspace/finalize-workspace}
-                                               (ptk/type %))
-                                    (tokens-commit? %))
-                               stream)]
-        (->> page-ids
-             (map #(rx/defer (fn [] (drain-page stream resolved-tokens changed %))))
-             (apply rx/concat (rx/of ::dps/force-persist))
-             (rx/take-until stopper))))))
+(def token-change-types pv/token-change-types)
 
 (defn lazy?
   "True when a change of the tokens only sets the current page."
@@ -501,9 +392,12 @@
                 :else
                 (let [undo-id (js/Symbol)
                       tpoint  (ct/tpoint-ms)
+                      ;; The drain sets the other pages and clears their thumbnails
+                      drain-pages? (and (lazy?) (drain?) (nil? root-ids) (not thumbnails-only?))
                       scopes  (if (some? root-ids)
                                 [{:page-id page-id :root-ids root-ids}]
                                 (cond-> (vec (page-scopes state changed (lazy?) thumbnails-only?))
+                                  drain-pages?    (subvec 0 1)
                                   (some? changes) (assoc-in [0 :changes] changes)
                                   :always         (assoc-in [0 :save-resolved?] true)))
                       ;; Thumbnails only, cleared while the user goes on working
@@ -527,7 +421,7 @@
                         ;; The texts of the current page are laid out before
                         ;; the other pages are set; the change and the page
                         ;; are saved once the dialog closes
-                        (if (next scopes)
+                        (if (or (next scopes) drain-pages?)
                           (rx/of :app.main.data.workspace/layout-texts
                                  (dwtpr/persist-when-closed))
                           (rx/empty))
@@ -536,9 +430,9 @@
                           (rx/empty)
                           (rx/of (dwu/commit-undo-transaction undo-id)))
                         ;; The pages left out of date
-                        (if (and (lazy?) (drain?) (nil? root-ids) (not thumbnails-only?))
+                        (if drain-pages?
                           (let [current-page-id (:current-page-id state)]
-                            (rx/of (drain-pages resolved-tokens changed
+                            (rx/of (drain/start resolved-tokens changed
                                                 (into [] (remove #(= % current-page-id))
                                                       (:pages (dsh/lookup-file-data state))))))
                           (rx/empty)))

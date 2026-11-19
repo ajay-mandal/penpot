@@ -143,8 +143,9 @@
    [frontend-tests.text-editor-paste-guard-test]
    [frontend-tests.tokens.context-menu-test]
    [frontend-tests.tokens.copy-paste-props-test]
-   [frontend-tests.tokens.export-modal-test]
    [frontend-tests.tokens.correction-test]
+   [frontend-tests.tokens.drain-test]
+   [frontend-tests.tokens.export-modal-test]
    [frontend-tests.tokens.import-export-test]
    [frontend-tests.tokens.logic.token-actions-test]
    [frontend-tests.tokens.logic.token-data-test]
@@ -386,6 +387,7 @@
    'frontend-tests.tokens.context-menu-test
    'frontend-tests.tokens.export-modal-test
    'frontend-tests.tokens.correction-test
+   'frontend-tests.tokens.drain-test
    'frontend-tests.tokens.import-export-test
    'frontend-tests.tokens.lookup-test
    'frontend-tests.tokens.logic.token-actions-test
