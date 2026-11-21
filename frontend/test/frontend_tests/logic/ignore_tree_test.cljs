@@ -54,3 +54,53 @@
         rect-id (last (copy-ids objects))
         tree    (ignore-tree objects [rect-id])]
     (t/is (false? (get tree rect-id)))))
+
+(defn- objects
+  [file]
+  (:objects (cthf/current-page file)))
+
+(t/deftest a-copy-moved-as-a-whole-is-not-touched
+  (let [file     (ctho/add-simple-component-with-copy (cthf/sample-file :file1)
+                                                      :component1 :main-root :main-child :copy-root)
+        objects  (objects file)
+        root-id  (cthi/id :copy-root)
+        child-id (first (:shapes (get objects root-id)))
+        move     (gmt/translate-matrix (gpt/point 10 0))
+        tree     (dwm/calculate-ignore-tree-wasm {root-id move child-id move} objects)]
+    (t/is (true? (get tree root-id)))
+    (t/is (true? (get tree child-id)))))
+
+(t/deftest a-copy-child-moved-alone-is-touched
+  (let [file     (ctho/add-simple-component-with-copy (cthf/sample-file :file1)
+                                                      :component1 :main-root :main-child :copy-root)
+        objects  (objects file)
+        child-id (first (:shapes (get objects (cthi/id :copy-root))))
+        tree     (dwm/calculate-ignore-tree-wasm {child-id (gmt/translate-matrix (gpt/point 10 0))}
+                                                 objects)]
+    (t/is (false? (get tree child-id)))))
+
+(t/deftest the-shapes-out-of-copies-are-left-out
+  (let [file    (ctho/add-simple-component-with-copy (cthf/sample-file :file1)
+                                                     :component1 :main-root :main-child :copy-root)
+        objects (objects file)
+        main-id (cthi/id :main-root)
+        tree    (dwm/calculate-ignore-tree-wasm {main-id (gmt/translate-matrix (gpt/point 10 0))}
+                                                objects)]
+    (t/is (empty? tree))))
+
+(t/deftest a-copy-in-a-main-is-compared-with-its-own-root
+  ;; The main is resized and the copy inside it stays where it is: its
+  ;; shapes keep their place in the copy, though not in the main.
+  (let [file     (ctho/add-nested-component (cthf/sample-file :file1)
+                                            :component1 :main1-root :main1-child
+                                            :component2 :main2-root :nested-head)
+        objects  (objects file)
+        main-id  (cthi/id :main2-root)
+        head-id  (cthi/id :nested-head)
+        child-id (first (:shapes (get objects head-id)))
+        tree     (dwm/calculate-ignore-tree-wasm {main-id  (gmt/scale-matrix (gpt/point 2 1))
+                                                  head-id  (gmt/matrix)
+                                                  child-id (gmt/matrix)}
+                                                 objects)]
+    (t/is (true? (get tree head-id)))
+    (t/is (true? (get tree child-id)))))

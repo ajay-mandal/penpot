@@ -11,6 +11,7 @@
    #?(:cljs [clojure.string :as str])
    #?(:cljs [clojure.tools.cli :refer [parse-opts]])
    #?(:cljs [common-tests.fonts-test])
+   #?(:cljs [common-tests.geom-modifiers-layout-test])
    #?(:cljs [common-tests.render-wasm.modifiers-test])
    #?(:cljs [goog.object :as gobj])
    [clojure.test :as t]
@@ -147,6 +148,7 @@
    'common-tests.files-builder-test
    #?(:cljs 'common-tests.fonts-test)
    #?(:cljs 'common-tests.render-wasm.modifiers-test)
+   #?(:cljs 'common-tests.geom-modifiers-layout-test)
    'common-tests.files-changes-test
    'common-tests.files-migrations-0025-test
    'common-tests.files-migrations-0026-test
