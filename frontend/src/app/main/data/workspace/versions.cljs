@@ -18,6 +18,7 @@
    [app.main.data.workspace :as dw]
    [app.main.data.workspace.pages :as dwpg]
    [app.main.data.workspace.thumbnails :as th]
+   [app.main.data.workspace.tokens.correction :as-alias dwtc]
    [app.main.features :as features]
    [app.main.repo :as rp]
    [app.util.i18n :refer [tr]]
@@ -412,19 +413,22 @@
 
   (ptk/reify ::restore-version-from-plugins
     ptk/WatchEvent
-    (watch [_ _ _]
+    (watch [_ _ stream]
       (->> (rx/concat
             (rx/of (ev/event {::ev/name "restore-version"
                               ::ev/origin "plugins"})
                    ::dwp/force-persist)
 
-            (->> (dwp/wait-persisted-or-error)
-                 (rx/mapcat #(rp/cmd! :restore-file-snapshot {:file-id file-id :id id}))
-                 (rx/map #(initialize-version)))
-
-            (->> (rx/of 1)
-                 (rx/tap resolve)
-                 (rx/ignore)))
+            (rx/merge
+             ;; Resolve once the restored page holds the values of its tokens
+             (->> stream
+                  (rx/filter (ptk/type? ::dwtc/tokens-ready))
+                  (rx/take 1)
+                  (rx/tap resolve)
+                  (rx/ignore))
+             (->> (dwp/wait-persisted-or-error)
+                  (rx/mapcat #(rp/cmd! :restore-file-snapshot {:file-id file-id :id id}))
+                  (rx/map #(initialize-version)))))
 
            ;; Restore the live file before rejecting the plugin promise.
            (rx/catch (fn [error]
