@@ -828,29 +828,31 @@
   (assert (ch/check-changes changes)
           "expected valid changes vector")
 
-  (ptk/reify ::ext-library-changed
-    ptk/UpdateEvent
-    (update [_ state]
-      (-> state
-          (update-in [:files library-id]
-                     assoc :modified-at modified-at :revn revn)
-          (d/update-in-when [:files library-id :data]
-                            ch/process-changes changes)))
+  (let [previous-tokens* (volatile! nil)]
+    (ptk/reify ::ext-library-changed
+      ptk/UpdateEvent
+      (update [_ state]
+        (vreset! previous-tokens* (dwtp/active-tokens state))
+        (-> state
+            (update-in [:files library-id]
+                       assoc :modified-at modified-at :revn revn)
+            (d/update-in-when [:files library-id :data]
+                              ch/process-changes changes)))
 
-    ptk/WatchEvent
-    (watch [_ _ stream]
-      (let [stopper-s (rx/filter (ptk/type? ::ext-library-changed) stream)]
-        (->>
-         (rx/merge
-          (->> (rx/of library-id)
-               (rx/delay 5000)
-               (rx/map fetch-library-thumbnails))
-          (when (ch/tokens-lib-changed? changes)
-            (rx/of (dwtp/propagate-workspace-tokens)))
-          (when (ch/notifiable-token-change-occured? changes)
-            (rx/of (ntf/info (tr "workspace.tokens.notifications.source-sets-or-themes-updated")))))
+      ptk/WatchEvent
+      (watch [_ _ stream]
+        (let [stopper-s (rx/filter (ptk/type? ::ext-library-changed) stream)]
+          (->>
+           (rx/merge
+            (->> (rx/of library-id)
+                 (rx/delay 5000)
+                 (rx/map fetch-library-thumbnails))
+            (when (ch/tokens-lib-changed? changes)
+              (rx/of (dwtp/propagate-workspace-tokens {:previous-tokens @previous-tokens*})))
+            (when (ch/notifiable-token-change-occured? changes)
+              (rx/of (ntf/info (tr "workspace.tokens.notifications.source-sets-or-themes-updated")))))
 
-         (rx/take-until stopper-s))))))
+           (rx/take-until stopper-s)))))))
 
 (defn reset-component
   "Cancels all modifications in the shape with the given id, and all its children, in
@@ -1031,22 +1033,28 @@
             (sync-file file-id file-id :components component-id undo-group))
           (dwu/commit-undo-transaction undo-id)))))))
 
-(defn update-component-thumbnail
-  "Update the thumbnail of the component with the given id, in the
-   current file and in the imported libraries.
-   For WASM, re-renders and persists to the server in one step.
-   For SVG, update-thumbnail already handles both render + persist."
-  [component-id file-id]
-  (ptk/reify ::update-component-thumbnail
+(defn update-component-thumbnails
+  "Update the thumbnails of `components`, a coll of [component-id file-id]:
+  rendered and uploaded by the worker with render-wasm, one after another
+  otherwise."
+  [components]
+  (ptk/reify ::update-component-thumbnails
     ptk/WatchEvent
     (watch [_ state _]
       (if (features/active-feature? state "render-wasm/v1")
-        (let [data      (dsh/lookup-file-data state file-id)
-              component (ctkl/get-component data component-id)
-              page-id   (:main-instance-page component)
-              root-id   (:main-instance-id component)]
-          (rx/of (dwt.wasm/render-thumbnail file-id page-id root-id :persist? true)))
-        (rx/of (update-component-thumbnail-sync state component-id file-id "component"))))))
+        (->> (rx/from components)
+             (rx/map (fn [[component-id file-id]]
+                       (let [data      (dsh/lookup-file-data state file-id)
+                             component (ctkl/get-component data component-id)]
+                         (when component
+                           (dwt.wasm/render-thumbnail file-id
+                                                      (:main-instance-page component)
+                                                      (:main-instance-id component)
+                                                      :persist? true)))))
+             (rx/filter some?))
+        (->> (rx/from components)
+             (rx/map (fn [[component-id file-id]]
+                       (update-component-thumbnail-sync state component-id file-id "component"))))))))
 
 (defn- find-shape-index
   [objects id shape-id]
@@ -1633,6 +1641,37 @@
                                     ;; Follows a change already made, a rollback included
                                     :ignore-save-lock true}))))))
 
+(defn- touch-components
+  "Update the modified-at attribute of the components with the given ids
+  to now, in a single commit."
+  [ids]
+  (ptk/reify ::touch-components
+    ptk/WatchEvent
+    (watch [it state _]
+      (let [data    (dsh/lookup-file-data state)
+            now     (ct/now)
+            changes (reduce (fn [changes id]
+                              (pcb/update-component changes id #(assoc % :modified-at now)))
+                            (-> (pcb/empty-changes it)
+                                (pcb/with-library-data data))
+                            ids)]
+        (rx/of (dch/commit-changes {:origin it
+                                    :redo-changes (:redo-changes changes)
+                                    :undo-changes []
+                                    :save-undo? false}))))))
+
+(defn- persist-shared-component-thumbnails
+  "Update the thumbnails of `components`, a coll of [component-id file-id],
+  when their file is a shared library, so the files that use it see them.
+  The workspace renders its own stale thumbnails when it shows them."
+  [components]
+  (ptk/reify ::persist-shared-component-thumbnails
+    ptk/WatchEvent
+    (watch [_ state _]
+      (let [shared? (fn [[_ file-id]] (:is-shared (dsh/lookup-file state file-id)))]
+        (when-let [components (seq (filter shared? components))]
+          (rx/of (update-component-thumbnails components)))))))
+
 (defn component-changed
   "Notify that the component with the given id has changed, so it needs to be updated
    in the current file and in the copies. And also update its thumbnails."
@@ -1720,7 +1759,7 @@
             (rx/buffer-until (rx/debounce 0 commits-s) commits-s)
 
             get-component-changes
-            (fn [old-data {:keys [file-id changes save-undo? undo-group]}]
+            (fn [old-data {:keys [file-id changes save-undo? undo-group tags]}]
               (let [changed-components
                     (when (and old-data
                                (or (nil? file-id) (= file-id (:id old-data))))
@@ -1730,6 +1769,11 @@
                 (cond
                   (empty? changed-components)
                   nil
+
+                  ;; The propagation already updated the copies, undoable or not
+                  (contains? tags :token-propagation)
+                  (map #(vector ::propagated-component-changed % (:id old-data))
+                       changed-components)
 
                   save-undo?
                   (do
@@ -1752,8 +1796,13 @@
                              (get-component-changes old-data event)))
                    (distinct)
                    (map (fn [[type component-id file-id undo-group]]
-                          (if (= type ::component-changed)
+                          (case type
+                            ::component-changed
                             (component-changed component-id file-id undo-group)
+
+                            ::propagated-component-changed
+                            (ptk/data-event ::propagated-component-changed [component-id file-id])
+
                             (touch-component component-id))))
                    (rx/from)))
 
@@ -1790,11 +1839,11 @@
                         (rx/map first)))
                  (rx/mapcat
                   (fn [[{:keys [file-id changes]} old-data]]
-                    (if (= file-id (:id old-data))
-                      (->> (into #{} (mapcat (partial ch/components-changed old-data)) changes)
-                           (rx/from)
-                           (rx/map #(update-component-thumbnail % file-id)))
-                      (rx/empty)))))]
+                    (let [ids (when (= file-id (:id old-data))
+                                (into #{} (mapcat (partial ch/components-changed old-data)) changes))]
+                      (if (seq ids)
+                        (rx/of (update-component-thumbnails (map #(vector % file-id) ids)))
+                        (rx/empty))))))]
 
         (when (or (contains? cf/flags :component-thumbnails)
                   (features/active-feature? state "render-wasm/v1"))
@@ -1822,9 +1871,23 @@
                      (rx/filter (ptk/type? ::component-changed))
                      (rx/map deref)
                      (rx/buffer-until notifier-s)
-                     (rx/mapcat #(into #{} %))
-                     (rx/map (fn [[component-id file-id]]
-                               (update-component-thumbnail component-id file-id))))
+                     (rx/map #(update-component-thumbnails (into #{} %))))
+
+                ;; Components changed by a token propagation are marked as
+                ;; modified once, when the propagation finishes.
+                (->> component-events-s
+                     (rx/filter (ptk/type? ::propagated-component-changed))
+                     (rx/map deref)
+                     (rx/buffer-until
+                      (->> stream
+                           (rx/filter (ptk/type? ::dwtp/propagation-finished))
+                           ;; Let the changes of its last commit arrive first
+                           (rx/delay 100)))
+                     (rx/filter seq)
+                     (rx/mapcat (fn [changed]
+                                  (let [changed (into #{} changed)]
+                                    (rx/of (touch-components (map first changed))
+                                           (persist-shared-component-thumbnails changed))))))
 
                 ;; Undo/redo emit touch-component instead.
                 (->> component-events-s

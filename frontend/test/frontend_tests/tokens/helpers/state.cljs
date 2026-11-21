@@ -11,6 +11,7 @@
    [app.main.data.changes :as dch]
    [app.main.data.helpers :as dsh]
    [app.main.data.style-dictionary :as sd]
+   [app.main.data.workspace.tokens.propagation :as dwtp]
    [app.main.data.workspace.undo :as dwu]
    [beicon.v2.core :as rx]
    [potok.v2.core :as ptk]))
@@ -28,18 +29,29 @@
       (rx/empty))))
 
 (defn end+
+  "Emits `end` once the running token propagations have finished and the
+  active tokens are resolved."
   []
   (ptk/reify ::end+
     ptk/WatchEvent
-    (watch [_ state _]
-      (let [data (dsh/lookup-file-data state)
+    (watch [_ state stream]
+      (let [data          (dsh/lookup-file-data state)
             tokens-status (cfo/get-tokens-status data)
-            tokens-lib    (cfo/get-tokens-lib data)]
-        (if (and tokens-status tokens-lib)
-          (->> (cfo/get-tokens-in-active-sets tokens-status tokens-lib)
-               (sd/resolve-tokens)
-               (rx/mapcat #(rx/of (end))))
-          (rx/of (end)))))))
+            tokens-lib    (cfo/get-tokens-lib data)
+            running       (dwtp/running-propagations state)]
+        (rx/concat
+         (if (seq running)
+           (->> stream
+                (rx/filter (ptk/type? ::dwtp/propagation-finished))
+                (rx/filter #(contains? running (deref %)))
+                (rx/take (count running))
+                (rx/ignore))
+           (rx/empty))
+         (if (and tokens-status tokens-lib)
+           (->> (cfo/get-tokens-in-active-sets tokens-status tokens-lib)
+                (sd/resolve-tokens)
+                (rx/mapcat #(rx/of (end))))
+           (rx/of (end))))))))
 
 (defn stop-on
   "Helper function to be used with async version of run-store.
@@ -52,6 +64,13 @@
          (rx/filter #(ptk/type? event-type %))
          ;; Safeguard timeout
          (rx/timeout 200 (rx/of :the/end)))))
+
+(defn stop-on-undo-commit
+  "Stops after the first `commit-undo-transaction`, the last event of a
+  tokens propagation. Use it when the propagation resolves tokens more
+  than once and outlasts `end+`."
+  [stream]
+  (rx/filter (ptk/type? ::dwu/commit-undo-transaction) stream))
 
 (def stop-on-send-update-indices
   "Stops on `send-update-indices` function being called, which should be the last function of an event chain."

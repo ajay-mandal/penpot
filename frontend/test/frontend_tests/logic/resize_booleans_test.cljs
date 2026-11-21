@@ -47,9 +47,9 @@
       (with-bool-content :icon)))
 
 (defn- resize
-  "Run a resize of `label` to `width` without touched flags, counting the
-  boolean calculations, and call `check-fn` with the resulting file and the
-  count."
+  "Run a resize of `label` to `width` as token propagation does, counting
+  the boolean calculations, and call `check-fn` with the resulting file
+  and the count."
   [file label width done check-fn]
   (let [store  (ths/setup-store file)
         count* (atom 0)
@@ -63,8 +63,8 @@
      (fn []
        (set! path/wasm:calc-bool-content prev)
        (done))
-     [(dwtr/update-dimensions [(cthi/id label)] :width width
-                              {:ignore-touched true :no-wasm? true})]
+     [(dwtr/update-sizes {(cthi/id label) {:width width}}
+                         {:ignore-touched true :no-wasm? true})]
      (fn [new-state]
        (check-fn (ths/get-file-from-state new-state) @count*)))))
 

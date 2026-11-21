@@ -150,6 +150,7 @@
    [frontend-tests.tokens.logic.token-remapping-test]
    [frontend-tests.tokens.logic.tokens-source-test]
    [frontend-tests.tokens.logic.tokens-status-test]
+   [frontend-tests.tokens.lookup-test]
    [frontend-tests.tokens.referenced-token-value-test]
    [frontend-tests.tokens.shadow-form-test]
    [frontend-tests.tokens.style-dictionary-test]
@@ -203,6 +204,7 @@
    [frontend-tests.ui.viewport-texts-html-test]
    [frontend-tests.ui.viewport-top-bar-test]
    [frontend-tests.ui.workspace-libraries-test]
+   [frontend-tests.util-activity-test]
    [frontend-tests.util-clipboard-test]
    [frontend-tests.util-http-test]
    [frontend-tests.util-i18n-test]
@@ -383,6 +385,7 @@
    'frontend-tests.tokens.context-menu-test
    'frontend-tests.tokens.export-modal-test
    'frontend-tests.tokens.import-export-test
+   'frontend-tests.tokens.lookup-test
    'frontend-tests.tokens.logic.token-actions-test
    'frontend-tests.tokens.logic.token-data-test
    'frontend-tests.tokens.logic.token-remapping-test
@@ -443,6 +446,7 @@
    'frontend-tests.ui.viewport-texts-html-test
    'frontend-tests.ui.viewport-top-bar-test
    'frontend-tests.ui.workspace-libraries-test
+   'frontend-tests.util-activity-test
    'frontend-tests.util-clipboard-test
    'frontend-tests.util-http-test
    'frontend-tests.util-i18n-test

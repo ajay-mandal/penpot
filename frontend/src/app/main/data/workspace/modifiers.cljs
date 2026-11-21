@@ -63,46 +63,6 @@
   (when (wasm-gesture/try-end-interactive-transform!)
     (wasm.api/set-modifiers-end)))
 
-(def ^:private transform-attrs
-  #{:selrect
-    :points
-    :x
-    :y
-    :r1
-    :r2
-    :r3
-    :r4
-    :shadow
-    :blur
-    :background-blur
-    :strokes
-    :width
-    :height
-    :content
-    :transform
-    :transform-inverse
-    :rotation
-    :flip-x
-    :flip-y
-    :grow-type
-    :position-data
-    :layout-gap
-    :layout-padding
-    :layout-item-h-sizing
-    :layout-item-max-h
-    :layout-item-max-w
-    :layout-item-min-h
-    :layout-item-min-w
-    :layout-item-v-sizing
-    :layout-padding-type
-    :layout-item-margin
-    :layout-item-margin-type
-    :layout-grid-cells
-    :layout-grid-columns
-    :layout-grid-rows
-    :fills
-    :fill-image})
-
 ;; -- temporary modifiers -------------------------------------------
 
 ;; During an interactive transformation of shapes (e.g. when resizing or rotating
@@ -938,7 +898,7 @@
                     (assoc :translation? translation?)
                     ;; Attributes that can change in the transform. This
                     ;; way we don't have to check all the attributes
-                    (assoc :attrs transform-attrs))
+                    (assoc :attrs ctm/transform-attrs))
 
                 modif-tree
                 (propagate-structure-modifiers modif-tree (dsh/lookup-page-objects state))
@@ -1082,7 +1042,10 @@
                 (assoc :moved-bool-ids (ctm/moved-bool-ids objects object-modifiers))
                 ;; Attributes that can change in the transform. This
                 ;; way we don't have to check all the attributes
-                (assoc :attrs transform-attrs))
+                (assoc :attrs ctm/transform-attrs))
+
+            ;; Resized texts drop their position data, to be laid out again
+            reset-resized-texts? (:reset-resized-texts? options)
 
             update-shape
             (fn [shape]
@@ -1095,7 +1058,12 @@
                 (-> shape
                     (gsh/transform-shape modifiers)
                     (cond-> (d/not-empty? pos-data)
-                      (assoc-position-data pos-data shape)))))]
+                      (assoc-position-data pos-data shape))
+                    (cond-> (and ^boolean text-shape?
+                                 reset-resized-texts?
+                                 (some? modifiers)
+                                 (not (ctm/only-move? modifiers)))
+                      (dissoc :position-data)))))]
 
         (rx/concat
          (if (seq frame-ids)
@@ -1142,21 +1110,4 @@
             (rx/of (dwu/commit-undo-transaction undo-id))
             (rx/empty))))))))
 
-;; Pure function to determine next grow-type for text layers
-(defn next-grow-type
-  [current-grow-type scalev]
-  (cond
-    (= current-grow-type :fixed)
-    :fixed
-
-    (and (not (mth/close? (:y scalev) 1.0))
-         (or (= current-grow-type :auto-width)
-             (= current-grow-type :auto-height)))
-    :fixed
-
-    (and (not (mth/close? (:x scalev) 1.0))
-         (= current-grow-type :auto-width))
-    :auto-height
-
-    :else
-    current-grow-type))
+(def next-grow-type ctm/next-grow-type)

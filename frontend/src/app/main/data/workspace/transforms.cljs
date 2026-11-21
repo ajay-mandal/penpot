@@ -528,11 +528,30 @@
             (rx/take-until
              (rx/filter (ptk/type? ::trigger-bounding-box-cloaking) stream)))))))
 
+(defn- resize-shapes
+  "Apply to the shapes in `ids` the modifiers from `get-modifier`, a
+  function of each shape, ignoring pixel snap."
+  [state ids get-modifier {:keys [no-wasm?] :as options}]
+  (let [page-id
+        (or (get options :page-id)
+            (get state :current-page-id))
+
+        objects
+        (dwsh/lookup-changed-objects state page-id)
+
+        modif-tree (dwm/build-modif-tree ids objects get-modifier)]
+
+    (if (and (features/active-feature? state "render-wasm/v1") (not no-wasm?))
+      (rx/of (dwm/apply-wasm-modifiers modif-tree (assoc options :ignore-snap-pixel true)))
+
+      (let [modif-tree (gm/set-objects-modifiers modif-tree objects (select-keys options [:changed-layout-ids]))]
+        (rx/of (dwm/apply-modifiers* objects modif-tree nil options))))))
+
 (defn update-dimensions
   "Change size of shapes, from the sidebar options form
   (will ignore pixel snap)"
   ([ids attr value] (update-dimensions ids attr value nil))
-  ([ids attr value {:keys [no-wasm?] :as options}]
+  ([ids attr value options]
    (assert (number? value))
    (assert (every? uuid? ids)
            "expected valid coll of uuids")
@@ -542,36 +561,24 @@
    (ptk/reify ::update-dimensions
      ptk/WatchEvent
      (watch [_ state _]
-       (let [page-id
-             (or (get options :page-id)
-                 (get state :current-page-id))
+       (resize-shapes state ids #(ctm/size-modifiers % {attr value}) options)))))
 
-             objects
-             (dwsh/lookup-changed-objects state page-id)
+(defn update-sizes
+  "Resize the shapes in `sizes`, a map of shape id to a map with its new
+  `:width`, its new `:height` or both, in a single modifiers pass. With
+  both and the proportion locked the height wins.
+  (will ignore pixel snap)"
+  ([sizes] (update-sizes sizes nil))
+  ([sizes options]
+   (assert (every? uuid? (keys sizes))
+           "expected valid map of uuids")
+   (assert (every? #(and (seq %) (every? number? (vals %))) (vals sizes))
+           "expected a numeric :width, :height or both for every shape")
 
-             get-modifier
-             (fn [shape]
-               (let [modifiers (ctm/change-dimensions-modifiers shape attr value)]
-                 ;; For text shapes, also update grow-type based on the resize
-                 (if (cfh/text-shape? shape)
-                   (let [{sr-width :width sr-height :height} (:selrect shape)
-                         new-width (if (= attr :width) value sr-width)
-                         new-height (if (= attr :height) value sr-height)
-                         scalev (gpt/point (/ new-width sr-width) (/ new-height sr-height))
-                         current-grow-type (dm/get-prop shape :grow-type)
-                         new-grow-type (dwm/next-grow-type current-grow-type scalev)]
-                     (cond-> modifiers
-                       (not= new-grow-type current-grow-type)
-                       (ctm/change-property :grow-type new-grow-type)))
-                   modifiers)))
-
-             modif-tree (dwm/build-modif-tree ids objects get-modifier)]
-
-         (if (and (features/active-feature? state "render-wasm/v1") (not no-wasm?))
-           (rx/of (dwm/apply-wasm-modifiers modif-tree (assoc options :ignore-snap-pixel true)))
-
-           (let [modif-tree (gm/set-objects-modifiers modif-tree objects)]
-             (rx/of (dwm/apply-modifiers* objects modif-tree nil options)))))))))
+   (ptk/reify ::update-sizes
+     ptk/WatchEvent
+     (watch [_ state _]
+       (resize-shapes state (keys sizes) #(ctm/size-modifiers % (get sizes (:id %))) options)))))
 
 (defn change-orientation
   "Change orientation of shapes, from the sidebar options form.
