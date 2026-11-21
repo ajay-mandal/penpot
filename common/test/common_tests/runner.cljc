@@ -33,6 +33,7 @@
    [common-tests.files-migrations-0038-test]
    [common-tests.files-migrations-0039-test]
    [common-tests.files-migrations-test]
+   [common-tests.files.changes-builder-test]
    [common-tests.files.comp-processors-test]
    [common-tests.files.helpers-test]
    [common-tests.files.page-diff-test]
@@ -91,6 +92,8 @@
    [common-tests.logic.text-touched-test]
    [common-tests.logic.token-apply-test]
    [common-tests.logic.token-test]
+   [common-tests.logic.token-values-test]
+   [common-tests.logic.tokens-propagation-test]
    [common-tests.logic.variants-paste-test]
    [common-tests.logic.variants-reparent-test]
    [common-tests.logic.variants-switch-test]
@@ -160,6 +163,7 @@
    'common-tests.files-migrations-0038-test
    'common-tests.files-migrations-0039-test
    'common-tests.files-migrations-test
+   'common-tests.files.changes-builder-test
    'common-tests.files.comp-processors-test
    'common-tests.files.helpers-test
    'common-tests.files.page-diff-test
@@ -218,6 +222,8 @@
    'common-tests.logic.text-touched-test
    'common-tests.logic.token-apply-test
    'common-tests.logic.token-test
+   'common-tests.logic.token-values-test
+   'common-tests.logic.tokens-propagation-test
    'common-tests.logic.variants-paste-test
    'common-tests.logic.variants-reparent-test
    'common-tests.logic.variants-switch-test
