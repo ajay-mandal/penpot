@@ -9,6 +9,7 @@
    [app.common.data :as d]
    [app.common.data.macros :as dm]
    [app.common.files.changes :as cpc]
+   [app.common.logging :as log]
    [app.common.schema :as sm]
    [app.common.time :as ct]
    [app.common.uuid :as uuid]
@@ -25,6 +26,7 @@
    [app.main.data.workspace.layout :as dwly]
    [app.main.data.workspace.libraries :as dwl]
    [app.main.data.workspace.texts :as dwt]
+   [app.main.repo :as rp]
    [app.main.router :as rt]
    [app.util.globals :refer [global]]
    [app.util.mouse :as mse]
@@ -45,6 +47,8 @@
 (declare handle-library-change)
 (declare handle-pointer-send)
 (declare handle-export-update)
+(declare send-presence-update)
+(declare resync-file)
 
 (defn- resubscribed?
   "True when `event` is a new subscription to `file-id`, which a reload of
@@ -102,8 +106,23 @@
                              ;; On reconnect, send again the subscription messages
                              (->> stream
                                   (rx/filter (ptk/type? ::dws/opened))
-                                  (rx/mapcat #(->> (rx/from initmsg)
-                                                   (rx/map dws/send))))
+                                  (rx/mapcat #(rx/concat
+                                               (->> (rx/from initmsg)
+                                                    (rx/map dws/send))
+                                               (rx/of (send-presence-update)))))
+
+                             ;; The changes of the file sent while the
+                             ;; connection was lost or the tab was frozen
+                             (->> (rx/merge
+                                   (rx/filter (ptk/type? ::dws/opened) stream)
+                                   (if (exists? js/document)
+                                     (rx/merge
+                                      (rx/from-event js/document "resume")
+                                      (->> (rx/from-event js/document "visibilitychange")
+                                           (rx/filter #(= "visible" (.-visibilityState js/document)))))
+                                     (rx/empty)))
+                                  (rx/debounce 500)
+                                  (rx/map (fn [_] (resync-file file-id))))
 
                              ;; Emit presence event for current user;
                              ;; this is because websocket server don't
@@ -190,6 +209,17 @@
                      :position point}]
         (rx/of (dws/send message))))))
 
+(defn send-presence-update
+  "Tell the other sessions of the file the page of this one."
+  []
+  (ptk/reify ::send-presence-update
+    ptk/WatchEvent
+    (watch [_ state _]
+      (when-let [file-id (:current-file-id state)]
+        (rx/of (dws/send {:type :presence-update
+                          :file-id file-id
+                          :page-id (:current-page-id state)}))))))
+
 ;; --- Finalize Websocket
 
 (defn finalize
@@ -211,7 +241,7 @@
     })
 
 (defn handle-presence
-  [{:keys [type session-id profile-id version] :as message}]
+  [{:keys [type session-id profile-id version page-id can-edit] :as message}]
   (letfn [(get-next-color [presence]
             (let [xfm   (comp (map second)
                               (map :color)
@@ -232,6 +262,8 @@
                 (assoc :profile-id profile-id)
                 (assoc :updated-at (ct/now))
                 (assoc :version version)
+                (cond-> (some? page-id) (assoc :page-id page-id))
+                (cond-> (boolean? can-edit) (assoc :can-edit can-edit))
                 (update :color update-color presence)
                 (assoc :text-color "#000000")))
 
@@ -286,27 +318,73 @@
    "expected valid parameters"
    (check-file-change-params! msg))
 
-  (ptk/reify ::handle-file-change
-    IDeref
-    (-deref [_] {:changes changes})
+  (let [applied? (volatile! false)]
+    (ptk/reify ::handle-file-change
+      IDeref
+      (-deref [_] {:changes changes :session-id (:session-id msg)})
 
+      ptk/UpdateEvent
+      (update [_ state]
+        ;; A change can come twice: notified and fetched again after a
+        ;; lost connection
+        (vreset! applied? (contains? (get-in state [::applied-revns file-id]) revn))
+        (update-in state [::applied-revns file-id]
+                   (fn [revns]
+                     (let [revns (conj (or revns (sorted-set)) revn)]
+                       (if (> (count revns) 512)
+                         (into (sorted-set) (drop 256) revns)
+                         revns)))))
+
+      ptk/WatchEvent
+      (watch [_ _ _]
+        ;; The commit event is responsible to apply the data localy
+        ;; and update the persistence internal state with the updated
+        ;; file-revn
+        (if @applied?
+          (rx/empty)
+          (rx/concat
+           (rx/of (dch/commit {:file-id file-id
+                               :file-revn revn
+                               :file-vern vern
+                               :save-undo? false
+                               :source :remote
+                               :redo-changes (vec changes)
+                               :undo-changes []}))
+           (if (:repaired msg)
+             (rx/of (dps/notify-repaired))
+             (rx/empty))))))))
+
+(defn- resync-file
+  "Apply the changes of other sessions saved in the file after the last one
+  this session has: the ones notified while the connection was lost or the
+  tab was frozen. When they can't all be fetched the file is loaded again."
+  [file-id]
+  (ptk/reify ::resync-file
     ptk/WatchEvent
-    (watch [_ _ _]
-      ;; The commit event is responsible to apply the data localy
-      ;; and update the persistence internal state with the updated
-      ;; file-revn
-
-      (rx/concat
-       (rx/of (dch/commit {:file-id file-id
-                           :file-revn revn
-                           :file-vern vern
-                           :save-undo? false
-                           :source :remote
-                           :redo-changes (vec changes)
-                           :undo-changes []}))
-       (if (:repaired msg)
-         (rx/of (dps/notify-repaired))
-         (rx/empty))))))
+    (watch [_ state _]
+      (let [revn       (:revn (dsh/lookup-file state file-id))
+            session-id (:session-id state)]
+        (when (some? revn)
+          (->> (rp/cmd! :get-file-changes {:file-id file-id :revn revn})
+               (rx/mapcat
+                (fn [{:keys [complete changes vern]}]
+                  (if complete
+                    (->> (rx/from changes)
+                         (rx/filter #(not= session-id (:session-id %)))
+                         (rx/map (fn [{:keys [revn changes] :as row}]
+                                   (handle-file-change {:type :file-change
+                                                        :file-id file-id
+                                                        :profile-id (or (:profile-id row) uuid/zero)
+                                                        :session-id (:session-id row)
+                                                        :revn revn
+                                                        :vern vern
+                                                        :changes changes}))))
+                    (rx/of (ptk/event ::dw/reload-current-file)))))
+               (rx/catch (fn [cause]
+                           (log/wrn :hint "unable to fetch the missed changes of the file"
+                                    :file-id (dm/str file-id)
+                                    :cause cause)
+                           (rx/empty)))))))))
 
 (defn handle-file-deleted
   [{:keys [file-id] :as msg}]

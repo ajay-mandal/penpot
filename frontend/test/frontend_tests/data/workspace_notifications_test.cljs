@@ -79,6 +79,27 @@
   (let [events (await (watch-file-change (file-change-msg {})))]
     (t/is (= [::dch/commit] (mapv ptk/type events)))))
 
+(defn- ^:async watch-event
+  [event state]
+  (let [events (atom [])]
+    (await (async/observe (ptk/watch event state (rx/empty))
+                          :on-next #(swap! events conj %)))
+    @events))
+
+;; Scenario: a change arrives twice, notified and fetched again after a lost
+;; connection. Proves: it is applied once.
+(t/deftest ^:async a-change-that-arrives-twice-is-applied-once
+  (let [msg    (file-change-msg {})
+        first  (dwntf/handle-file-change msg)
+        state  (ptk/update first {})
+        again  (dwntf/handle-file-change msg)
+        state' (ptk/update again state)]
+    (t/is (= [::dch/commit] (mapv ptk/type (await (watch-event first state)))))
+    (t/is (empty? (await (watch-event again state'))))
+    (t/testing "another revision of the file is applied"
+      (let [next (dwntf/handle-file-change (assoc msg :revn 2))
+            _    (ptk/update next state')]
+        (t/is (= [::dch/commit] (mapv ptk/type (await (watch-event next state')))))))))
 (defn- restored-events
   "Events the watch of `handle-file-restored` emits for `msg` on `state`."
   [state msg]
