@@ -7,12 +7,12 @@
 (ns app.loggers.audit.consumers.file-change-refs
   (:require
    [app.common.time :as ct]
+   [app.config :as cf]
    [app.db :as db]
    [app.jobs :as jobs]
    [app.loggers.audit.consumers :as consumers]
    [app.metrics :as mtx]
    [app.tasks.file-change-refs :as refs]
-   [app.tasks.fragments-gc :as fragments-gc]
    [integrant.core :as ig]))
 
 (defn- get-work
@@ -44,9 +44,9 @@
     ;; cursor. Its only writes are durable work and the cursor itself.
     (doseq [file-id (into #{} (map :file-id) work)]
       (refs/schedule-index cfg file-id))
-    (when (and (seq saves) (fragments-gc/marking-enabled? cfg))
+    (when (contains? cf/flags :feature-fdata-pointer-map)
       (doseq [file-id saves]
-        (jobs/submit cfg {::jobs/name :fragments-gc
+        (jobs/submit cfg {::jobs/name :file-fragments-gc
                           ::jobs/params {:file-id file-id}
                           ::jobs/label (str file-id)
                           ::jobs/delay (ct/duration {:minutes 10})

@@ -40,7 +40,7 @@
     (doseq [id change-ids]
       (th/db-insert! :file-change {:file-id file-id :id id}))
     (refs/index-change th/*system* file-id first-id)
-    (binding [cf/config (assoc cf/config :fragments-gc-enabled true)]
+    (binding [cf/flags (conj cf/flags :feature-fdata-pointer-map)]
       (let [id  (index/schedule-index th/*system* file-id)
             job (jobs/get-job th/*system* id)]
         (t/is (= "default" (:queue job)))
@@ -51,7 +51,7 @@
       (run-index (uuid/next)))
     (t/is (= (set change-ids)
              (into #{} (map :file-change-id) (th/db-query :file-change-refs {:file-id file-id}))))
-    (t/is (empty? (th/db-query :job {:name "fragments-gc"})))
+    (t/is (empty? (th/db-query :job {:name "file-fragments-gc"})))
     (t/is (= 1 (count (th/db-query :job {:name "index-file-change-refs"}))))))
 
 (t/deftest index-retries-an-unreadable-snapshot-after-indexing-the-rest-of-the-file

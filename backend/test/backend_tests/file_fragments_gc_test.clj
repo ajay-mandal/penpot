@@ -4,7 +4,7 @@
 ;;
 ;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
-(ns backend-tests.fragments-gc-test
+(ns backend-tests.file-fragments-gc-test
   (:require
    [app.common.exceptions :as ex]
    [app.common.time :as ct]
@@ -13,7 +13,7 @@
    [app.db :as db]
    [app.features.file-change-refs :as refs]
    [app.jobs :as jobs]
-   [app.tasks.fragments-gc :as gc]
+   [app.tasks.file-fragments-gc :as gc]
    [app.util.blob :as blob]
    [app.util.pointer-map :as pmap]
    [app.worker :as wrk]
@@ -69,7 +69,7 @@
 
 (defn- run-gc
   [file-id]
-  (gc/execute-fragments-gc th/*system* {:file-id file-id}))
+  (gc/execute-file-fragments-gc th/*system* {:file-id file-id}))
 
 (t/deftest marks-only-unreferenced-fragments-when-the-index-is-complete
   (let [{:keys [id] :as file} (fixture-file)
@@ -80,20 +80,20 @@
     (save-main th/*system* id main-ref)
     (db/tx-run! th/*system* insert-snapshot file snapshot-id history-ref)
     (refs/index-change th/*system* id snapshot-id)
-    (binding [cf/config (assoc cf/config :fragments-gc-enabled true)]
+    (binding [cf/flags (conj cf/flags :feature-fdata-pointer-map)]
       (run-gc id)
       (run-gc id))
     (t/is (marked? id orphan))
     (t/is (not (marked? id main-ref)))
     (t/is (not (marked? id history-ref)))
-    (t/is (empty? (get-jobs "fragments-gc")))))
+    (t/is (empty? (get-jobs "file-fragments-gc")))))
 
 (t/deftest missing-refs-queue-the-same-index-job-and-retry-without-marking
   (let [{:keys [id] :as file} (fixture-file)
         orphan      (fragment id)
         history-ref (fragment id)]
     (db/tx-run! th/*system* insert-snapshot file (uuid/next) history-ref)
-    (binding [cf/config (assoc cf/config :fragments-gc-enabled true)]
+    (binding [cf/flags (conj cf/flags :feature-fdata-pointer-map)]
       (dotimes [_ 2]
         (let [failure (ex/try! (run-gc id))]
           (t/is (= ::wrk/retry (:type (ex-data failure))))
@@ -103,7 +103,7 @@
       (t/is (= 1 (count (get-jobs "index-file-change-refs"))))
       (th/run-task! :index-file-change-refs {:file-id id})
       (t/is (empty? (refs/get-missing-change-ids th/*system* id 1)))
-      (t/is (empty? (get-jobs "fragments-gc")))
+      (t/is (empty? (get-jobs "file-fragments-gc")))
       (run-gc id))
     (t/is (marked? id orphan))
     (t/is (not (marked? id history-ref)))))
@@ -117,7 +117,7 @@
         prepared    (promise)
         proceed     (promise)]
     (save-main th/*system* id main-ref)
-    (binding [cf/config (assoc cf/config :fragments-gc-enabled true)]
+    (binding [cf/flags (conj cf/flags :feature-fdata-pointer-map)]
       (with-redefs [gc/prepare-lot (fn [cfg file-id]
                                      (let [lot (prepare cfg file-id)]
                                        (deliver prepared lot)
@@ -134,13 +134,13 @@
             (finally (deliver proceed true)))
           (t/is (= :stale (:status (deref @run 10000 nil)))))))
     (t/is (not (marked? id orphan)))
-    (t/is (= 1 (count (get-jobs "fragments-gc"))))))
+    (t/is (= 1 (count (get-jobs "file-fragments-gc"))))))
 
 (t/deftest changing-the-main-payload-without-changing-revn-invalidates-the-lot
   (let [{:keys [id]} (fixture-file)
         orphan       (fragment id)
         prepare      (deref #'gc/prepare-lot)]
-    (binding [cf/config (assoc cf/config :fragments-gc-enabled true)]
+    (binding [cf/flags (conj cf/flags :feature-fdata-pointer-map)]
       (with-redefs [gc/prepare-lot (fn [cfg file-id]
                                      (let [lot (prepare cfg file-id)]
                                        (db/tx-run! cfg
@@ -160,7 +160,7 @@
     (save-main th/*system* id main-ref)
     (fragment id)
     (fragment id)
-    (binding [cf/config (assoc cf/config :fragments-gc-enabled true)]
+    (binding [cf/flags (conj cf/flags :feature-fdata-pointer-map)]
       (with-redefs [gc/lot-size 1
                     gc/mark-lot (fn [cfg file-id lot]
                                   (let [result (mark cfg file-id lot)]
@@ -172,28 +172,34 @@
     (t/is (= 1 (:total (th/db-exec-one!
                         ["SELECT COUNT(*) AS total FROM file_data
                           WHERE file_id = ? AND type = 'fragment' AND deleted_at IS NOT NULL" id]))))
-    (t/is (= 1 (count (get-jobs "fragments-gc"))))))
+    (t/is (= 1 (count (get-jobs "file-fragments-gc"))))))
 
 (t/deftest a-recent-save-defers-fragment-marking
   (let [{:keys [id]} (fixture-file)
         orphan (fragment id)]
     (th/db-exec-one! ["UPDATE file SET modified_at = ? WHERE id = ?" (ct/now) id])
-    (binding [cf/config (assoc cf/config :fragments-gc-enabled true)]
+    (binding [cf/flags (conj cf/flags :feature-fdata-pointer-map)]
       (t/is (= :recent (:status (run-gc id)))))
     (t/is (not (marked? id orphan)))
-    (t/is (ct/is-after? (:scheduled-at (first (get-jobs "fragments-gc")))
+    (t/is (ct/is-after? (:scheduled-at (first (get-jobs "file-fragments-gc")))
                         (ct/in-future "47h")))))
 
-(t/deftest an-already-queued-fragment-gc-does-not-block-offload
+(t/deftest queued-fragment-gc-skips-preparation-without-pointer-maps
   (let [{:keys [id]} (fixture-file)
-        orphan     (fragment id)
-        offload-id (jobs/submit th/*system* {::jobs/name :offload-file-data
-                                             ::jobs/params {:file-id id}})]
-    (jobs/submit th/*system* {::jobs/name :fragments-gc
+        orphan (fragment id)]
+    (jobs/submit th/*system* {::jobs/name :file-fragments-gc
                               ::jobs/params {:file-id id}})
-    (binding [cf/config (assoc cf/config :fragments-gc-enabled true)]
+    (binding [cf/flags (disj cf/flags :feature-fdata-pointer-map)]
       (with-redefs [gc/prepare-lot (fn [& _] (throw (ex-info "disabled job prepared a lot" {})))]
-        (t/is (= :disabled (:status @(future (run-gc id)))))))
-    (t/is (not (marked? id orphan)))
-    (t/is (some? offload-id))
-    (t/is (pos? (:offloaded (th/run-task! :offload-file-data {:file-id id}))))))
+        (t/is (= :disabled (:status (th/run-task! :file-fragments-gc {:file-id id}))))))
+    (t/is (not (marked? id orphan)))))
+
+(t/deftest pointer-maps-enable-fragment-marking-with-pending-offload
+  (let [{:keys [id]} (fixture-file)
+        orphan (fragment id)]
+    (binding [cf/flags (conj cf/flags :feature-fdata-pointer-map :tiered-file-data-storage)]
+      (jobs/submit th/*system* {::jobs/name :offload-file-data
+                                ::jobs/params {:file-id id}})
+      (t/is (= {:status :complete :marked 1}
+               (th/run-task! :file-fragments-gc {:file-id id}))))
+    (t/is (marked? id orphan))))

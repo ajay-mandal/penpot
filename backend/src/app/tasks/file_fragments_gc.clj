@@ -4,7 +4,7 @@
 ;;
 ;; Copyright (c) KALEIDOS SUBSIDIARY SL
 
-(ns app.tasks.fragments-gc
+(ns app.tasks.file-fragments-gc
   "Prepare fragment marks from one database snapshot, then verify the
   roots again under the file lock before applying a bounded lot."
   (:require
@@ -27,26 +27,6 @@
 (def ^:private preparation-size 1000)
 (def ^:private retry-delay (ct/duration {:seconds 30}))
 (def ^:private coverage-retry-delay (ct/duration "1m"))
-
-(def ^:private sql:offload-pending
-  "SELECT EXISTS (
-     SELECT 1 FROM job WHERE tenant = ? AND name = 'offload-file-data'
-                           AND status IN ('new', 'retry')
-     UNION ALL
-     SELECT 1 FROM job WHERE tenant = ? AND name = 'offload-file-data'
-                           AND status = 'scheduled'
-     UNION ALL
-     SELECT 1 FROM job WHERE tenant = ? AND name = 'offload-file-data'
-                           AND status = 'running'
-   ) AS pending")
-
-(defn marking-enabled?
-  "Check before enqueue or preparation. Old producers must have stopped
-  submitting tiered offload before an operator enables fragment marking."
-  [cfg]
-  (and (cf/fragments-gc-enabled?)
-       (let [tenant (cf/get :tenant)]
-         (not (:pending (db/exec-one! cfg [sql:offload-pending tenant tenant tenant]))))))
 
 (def ^:private sql:get-file
   "SELECT revn, modified_at, xmin::text AS file_xid, ctid::text AS file_tid
@@ -193,16 +173,16 @@
 
 (defn- schedule
   [cfg file-id delay]
-  (jobs/submit cfg {::jobs/name :fragments-gc
+  (jobs/submit cfg {::jobs/name :file-fragments-gc
                     ::jobs/params {:file-id file-id}
                     ::jobs/label (str file-id)
                     ::jobs/dedupe true
                     ::jobs/delay delay}))
 
-(defn execute-fragments-gc
+(defn execute-file-fragments-gc
   [cfg {:keys [file-id]}]
-  ;; Even a job enqueued before the opt-in was turned off cannot take a lock.
-  (if-not (marking-enabled? cfg)
+  ;; A queued job must not take a lock after pointer maps are disabled.
+  (if-not (contains? cf/flags :feature-fdata-pointer-map)
     {:status :disabled}
     (let [lot    (prepare-lot cfg file-id)
           result (if (= :prepared (:status lot))
@@ -237,8 +217,8 @@
 
 (defmethod ig/init-key ::job-def
   [_ cfg]
-  {::jobs/name      :fragments-gc
+  {::jobs/name      :file-fragments-gc
    ::jobs/schema    schema:params
-   ::jobs/handler   (fn [_ params] (execute-fragments-gc cfg params))
+   ::jobs/handler   (fn [_ params] (execute-file-fragments-gc cfg params))
    ::jobs/decoder   (sm/decoder schema:params sm/json-transformer)
    ::jobs/validator (sm/validator schema:params)})

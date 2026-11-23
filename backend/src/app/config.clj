@@ -215,7 +215,6 @@
 
     [:deletion-delay {:optional true} ::ct/duration]
     [:file-clean-delay {:optional true} ::ct/duration]
-    [:fragments-gc-enabled {:optional true} :boolean]
     [:jobs-lease {:optional true} ::ct/duration]
     [:jobs-retention {:optional true} ::ct/duration]
     [:jobs-user-ttl {:optional true} ::ct/duration]
@@ -467,12 +466,6 @@
 (defonce ^:dynamic webhooks-enabled? (contains? flags :webhooks))
 (defonce ^:dynamic telemetry-enabled? (contains? flags :telemetry))
 (defonce ^:dynamic error-reporting-enabled? (contains? flags :error-reporting))
-
-(defn fragments-gc-enabled?
-  "Whether new fragment marking is opted in and tiered offload is disabled."
-  []
-  (and (true? (c/get config :fragments-gc-enabled))
-       (not (contains? flags :tiered-file-data-storage))))
 
 (defn validate!
   "Validate the currently loaded configuration data."

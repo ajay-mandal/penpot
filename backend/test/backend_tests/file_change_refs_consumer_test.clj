@@ -39,7 +39,7 @@
 
 (t/deftest events-for-the-same-file-share-one-pending-index-job
   (let [file-id (uuid/next)]
-    (binding [cf/config (assoc cf/config :fragments-gc-enabled false)]
+    (binding [cf/flags (disj cf/flags :feature-fdata-pointer-map)]
       (insert-event "update-file" "backend" "app"
                     {:id file-id :outcome "partial"})
       (insert-event "create-file-snapshot" "backend" "app" {:file-id file-id})
@@ -48,7 +48,7 @@
       (insert-event "create-file-snapshot" "backend" "app" {:file-id file-id})
       (consumers/run-pass th/*system* consumer/consumer)
       (t/is (= [{:file-id (str file-id)}] (pending "index-file-change-refs")))
-      (t/is (empty? (pending "fragments-gc")))
+      (t/is (empty? (pending "file-fragments-gc")))
       (t/is (pos? (:seq (th/db-exec-one!
                          ["SELECT seq FROM audit_log_consumer_cursor WHERE consumer = 5"])))))))
 
@@ -67,44 +67,43 @@
 
 (t/deftest existing-rpc-events-index-history-without-external-destinations
   (th/with-audit-config #{:auto-file-snapshot} [audit/submit submit-audit]
-    (binding [cf/config (assoc cf/config :fragments-gc-enabled false)]
-      (let [profile    (th/create-profile* 1)
-            profile-id (:id profile)
-            file       (th/create-file* 1 {:profile-id profile-id
-                                           :project-id (:default-project-id profile)})
-            file-id    (:id file)
-            page-id    (first (get-in file [:data :pages]))
-            older-id   (uuid/next)
-            save       (th/command! {::th/type :update-file
-                                     ::rpc/profile-id profile-id
-                                     :id file-id
-                                     :session-id (uuid/next)
-                                     :vern 0
-                                     :revn 0
-                                     :features cfeat/supported-features
-                                     :changes [(th/add-rect-change page-id (uuid/next))]})
-            snapshot   (th/command! {::th/type :create-file-snapshot
-                                     ::rpc/profile-id profile-id
-                                     :file-id file-id
-                                     :label "manual"})]
-        (t/is (th/success? save))
-        (t/is (th/success? snapshot))
-        (t/is (= [file-id]
-                 (mapv (comp :id db/decode-transit-pgobject :props)
-                       (th/db-query :audit-log {:name "update-file"}))))
-        (t/is (= [file-id]
-                 (mapv (comp :file-id db/decode-transit-pgobject :props)
-                       (th/db-query :audit-log {:name "create-file-snapshot"}))))
-        (th/db-insert! :file-change {:file-id file-id :id older-id :revn 0})
-        (let [changes (th/db-query :file-change {:file-id file-id} {::db/remove-deleted false})]
-          (t/is (= 4 (count changes)))
-          (t/is (empty? (th/db-query :audit-log {:name "file-change-created"})))
-          (consumers/run-pass th/*system* consumer/consumer)
-          (t/is (= [{:file-id (str file-id)}] (pending "index-file-change-refs")))
-          (th/run-task! :index-file-change-refs {:file-id file-id})
-          (t/is (= (into #{} (map :id) changes)
-                   (into #{} (map :file-change-id) (th/db-query :file-change-refs {:file-id file-id}))))
-          (t/is (empty? (pending "fragments-gc"))))))))
+    (let [profile    (th/create-profile* 1)
+          profile-id (:id profile)
+          file       (th/create-file* 1 {:profile-id profile-id
+                                         :project-id (:default-project-id profile)})
+          file-id    (:id file)
+          page-id    (first (get-in file [:data :pages]))
+          older-id   (uuid/next)
+          save       (th/command! {::th/type :update-file
+                                   ::rpc/profile-id profile-id
+                                   :id file-id
+                                   :session-id (uuid/next)
+                                   :vern 0
+                                   :revn 0
+                                   :features cfeat/supported-features
+                                   :changes [(th/add-rect-change page-id (uuid/next))]})
+          snapshot   (th/command! {::th/type :create-file-snapshot
+                                   ::rpc/profile-id profile-id
+                                   :file-id file-id
+                                   :label "manual"})]
+      (t/is (th/success? save))
+      (t/is (th/success? snapshot))
+      (t/is (= [file-id]
+               (mapv (comp :id db/decode-transit-pgobject :props)
+                     (th/db-query :audit-log {:name "update-file"}))))
+      (t/is (= [file-id]
+               (mapv (comp :file-id db/decode-transit-pgobject :props)
+                     (th/db-query :audit-log {:name "create-file-snapshot"}))))
+      (th/db-insert! :file-change {:file-id file-id :id older-id :revn 0})
+      (let [changes (th/db-query :file-change {:file-id file-id} {::db/remove-deleted false})]
+        (t/is (= 4 (count changes)))
+        (t/is (empty? (th/db-query :audit-log {:name "file-change-created"})))
+        (consumers/run-pass th/*system* consumer/consumer)
+        (t/is (= [{:file-id (str file-id)}] (pending "index-file-change-refs")))
+        (th/run-task! :index-file-change-refs {:file-id file-id})
+        (t/is (= (into #{} (map :id) changes)
+                 (into #{} (map :file-change-id) (th/db-query :file-change-refs {:file-id file-id}))))
+        (t/is (empty? (pending "file-fragments-gc")))))))
 
 (t/deftest only-effective-backend-saves-activate-fragment-marking
   (let [file-id     (uuid/next)
@@ -112,8 +111,9 @@
         untrusted   (uuid/next)
         change-props (fn [file-id outcome]
                        {:id file-id :outcome outcome})]
-    (binding [cf/config (assoc cf/config :fragments-gc-enabled true)
-              cf/flags #{}]
+    (binding [cf/flags #{:feature-fdata-pointer-map :tiered-file-data-storage}]
+      (jobs/submit th/*system* {::jobs/name :offload-file-data
+                                ::jobs/params {:file-id file-id}})
       (insert-event "update-file" "backend" "app" (change-props file-id "saved"))
       (insert-event "update-file" "backend" "app" (change-props file-id "partial"))
       (insert-event "update-file" "backend" "app" (change-props untrusted "rejected"))
@@ -123,7 +123,7 @@
       (insert-event "create-file-snapshot" "backend" "admin-console" {:file-id untrusted})
       (insert-event "create-file-snapshot" "backend" "app" {:file-id snapshot})
       (consumers/run-pass th/*system* consumer/consumer)
-      (t/is (= [{:file-id (str file-id)}] (pending "fragments-gc")))
+      (t/is (= [{:file-id (str file-id)}] (pending "file-fragments-gc")))
       (t/is (= #{(str file-id) (str snapshot)}
                (into #{} (map :file-id) (pending "index-file-change-refs")))))))
 

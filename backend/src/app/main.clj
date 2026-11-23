@@ -659,7 +659,7 @@
     :run-webhook           (ig/ref ::webhooks/run-webhook-job-def)
     :process-webhook-event (ig/ref ::webhooks/process-webhook-event-job-def)
     :file-gc               (ig/ref :app.tasks.file-gc/job-def)
-    :fragments-gc          (ig/ref :app.tasks.fragments-gc/job-def)
+    :file-fragments-gc     (ig/ref :app.tasks.file-fragments-gc/job-def)
     :index-file-change-refs (ig/ref :app.tasks.file-change-refs/job-def)
     :offload-file-data     (ig/ref :app.tasks.offload-file-data/job-def)
     :objects-gc            (ig/ref :app.tasks.objects-gc/job-def)
@@ -765,7 +765,7 @@
    {::db/pool     (ig/ref ::db/pool)
     ::mtx/metrics (ig/ref ::mtx/metrics)}
 
-   :app.tasks.fragments-gc/job-def
+   :app.tasks.file-fragments-gc/job-def
    {::db/pool     (ig/ref ::db/pool)
     ::sto/storage (ig/ref ::sto/storage)
     ::mtx/metrics (ig/ref ::mtx/metrics)}

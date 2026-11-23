@@ -162,8 +162,3 @@
       (t/is (not (contains? flags :audit-log)))
       (t/is (contains? flags :nexus))
       (t/is (cf/persist-audit-events? flags)))))
-
-(t/deftest fragment-marking-is-opt-in
-  (t/is (not (cf/get :fragments-gc-enabled)))
-  (t/is (= true (:fragments-gc-enabled
-                 (cf/decode-config {:fragments-gc-enabled "true"})))))
