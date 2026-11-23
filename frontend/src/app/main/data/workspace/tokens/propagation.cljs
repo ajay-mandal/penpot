@@ -143,10 +143,12 @@
   them when `changed` is nil. With `:thumbnails-only?` no shape is set: the
   page is set when it is opened or read, and the thumbnails of its frames
   `frame-ids` and main components `main-ids` that are left out of date are
-  cleared. With `:background?` the commit is not undoable. Without `changes`
+  cleared. With `:background?` the commit is not undoable; otherwise it is
+  undone with the commits of `:undo-group`, when given. Without `changes`
   the commit only follows the tokens, so it goes through while saves fail."
   [it state resolved-tokens changed
-   {:keys [page-id root-ids changes save-resolved? thumbnails-only? main-ids frame-ids background?]
+   {:keys [page-id root-ids changes save-resolved? thumbnails-only? main-ids frame-ids background?
+           undo-group]
     scope-targets :targets} tags]
   (let [derived? (nil? changes)
         file-id  (get state :current-file-id)
@@ -184,7 +186,8 @@
               (pcb/set-tokens-resolved saved (cltp/values-to-save resolved-tokens saved)))
             (cond-> (seq tags) (update :tags (fnil into #{}) tags))
             ;; Work in the background is not something to undo
-            (cond-> background? (pcb/set-save-undo? false)))
+            (cond-> background? (pcb/set-save-undo? false))
+            (cond-> (and (some? undo-group) (not background?)) (assoc :undo-group undo-group)))
 
         changed-ids
         (keep #(when (= :mod-obj (:type %)) (:id %)) (:redo-changes changes))]
@@ -368,12 +371,13 @@
 (defn- run-propagation
   "The work of a propagation, from the state when the previous one has
   finished."
-  [run-id {:keys [page-id root-ids previous-tokens changes thumbnails-only?]}]
+  [run-id {:keys [page-id root-ids previous-tokens changes thumbnails-only? token-names undo-group]}]
   (ptk/reify ::run-propagation
     ptk/WatchEvent
     (watch [_ state stream]
       (let [previous-tokens (if (some? changes) (active-tokens state) previous-tokens)
-            tokens-tree     (active-tokens (cond-> state (some? changes) (with-changes changes)))
+            new-state       (cond-> state (some? changes) (with-changes changes))
+            tokens-tree     (active-tokens new-state)
             commit-changes  (when (and (some? changes) (seq (:redo-changes changes)))
                               (rx/of (dch/commit-changes changes)))
 
@@ -400,6 +404,8 @@
                                   drain-pages?    (subvec 0 1)
                                   (some? changes) (assoc-in [0 :changes] changes)
                                   :always         (assoc-in [0 :save-resolved?] true)))
+                      scopes  (cond->> scopes
+                                (some? undo-group) (mapv #(assoc % :undo-group undo-group)))
                       ;; Thumbnails only, cleared while the user goes on working
                       background? (and (next scopes) (every? :thumbnails-only? (rest scopes)))
                       ;; The current page weighs as much as the other pages waited for
@@ -441,12 +447,18 @@
 
         (rx/concat
          (->> (if (some? tokens-tree)
-                (->> (dwta/resolve-sets tokens-tree (dwta/base-font-size state))
+                (->> (dwta/resolve-sets tokens-tree (dwta/base-font-size new-state))
                      (rx/mapcat
                       (fn [resolved-tokens]
-                        (if (some? previous-tokens)
+                        (cond
+                          (some? token-names)
+                          (rx/of [resolved-tokens (select-keys resolved-tokens token-names)])
+
+                          (some? previous-tokens)
                           (->> (dwta/resolve-sets previous-tokens (dwta/base-font-size state))
                                (rx/map #(vector resolved-tokens (changed-tokens resolved-tokens %))))
+
+                          :else
                           (rx/of [resolved-tokens nil]))))
                      (rx/mapcat propagate))
                 (or commit-changes (rx/empty)))
@@ -478,8 +490,11 @@
     commit each.
   - `:previous-tokens`, the active token sets before a change, limits it to the
     shapes that apply the tokens whose resolved value changed.
-  - `:changes`, a change of the tokens to commit with the current page; the
-    tokens before it are the previous ones.
+  - `:changes`, a change of the tokens or of the base font size to commit
+    with the current page; the tokens before it are the previous ones.
+  - `:token-names` limits it to the shapes that apply those tokens.
+  - `:undo-group`: the commits are undone with the other ones of that
+    group.
   - `:thumbnails-only?`: set no shape, only clear the thumbnails left out
     of date, on every page.
 

@@ -34,6 +34,8 @@
    [app.main.data.workspace.tokens.library-edit :as dwtl]
    [app.main.data.workspace.tokens.progress :as dwtpr]
    [app.main.data.workspace.tokens.propagation :as dwtp]
+   [app.main.data.workspace.tokens.remapping :as remap]
+   [app.main.data.workspace.tokens.typography :as dwtt]
    [app.main.data.workspace.wasm-text :as dwwt]
    [app.util.activity :as activity]
    [beicon.v2.core :as rx]
@@ -832,6 +834,55 @@
               (rx/filter #(and (ptk/type? ::dwtc/tokens-ready %)
                                (= page2 (:page-id (deref %)))))
               (rx/take 1)))))))
+
+;; --- Changes that are not of the tokens
+
+(t/deftest a-new-base-font-size-sets-every-page
+  (t/async
+    done
+    (let [resolve dwta/resolve-sets
+          ;; The radius is a rem value: 50 at 16 pixels the rem
+          _       (set! dwta/resolve-sets
+                        (fn [sets base-font-size]
+                          (->> (resolve sets base-font-size)
+                               (rx/map (fn [tokens]
+                                         (update-vals tokens #(update % :resolved-value * (/ base-font-size 16))))))))
+          file    (assoc-in (setup-file-with-pages) [:data :options :base-font-size] "20px")
+          store   (ths/setup-store file)
+          commits (watch-commits store)
+          page2   #(cths/get-shape (ths/get-file-from-state %1) %2 :page-label :page2)]
+      (tohs/run-store-async
+       store done [(dwtt/set-base-font-size "32px")]
+       (fn [state]
+         (set! dwta/resolve-sets resolve)
+         (t/is (= 100 (:r1 (cths/get-shape (ths/get-file-from-state state) :stale))) "the current page")
+         (t/is (= 100 (:r1 (page2 state :other))) "the other pages")
+         (t/is (= 100 (:r1 (page2 state :main-root))))
+         (t/is (= ["20px"] (into [] (comp (mapcat :undo-changes)
+                                          (filter #(= :set-base-font-size (:type %)))
+                                          (map :base-font-size))
+                                 @commits))
+               "undone to the size it had"))))))
+
+(t/deftest a-remap-sets-every-page-in-one-undo-step
+  (t/async
+    done
+    (let [;; The token was renamed and changed; the shapes still apply its old name
+          file    (ctht/update-tokens-lib (setup-file-with-pages)
+                                          #(ctob/update-token % (cthi/id :set) (cthi/id :radius)
+                                                              (fn [token] (assoc token :name "corner" :value 70))))
+          store   (ths/setup-store file)
+          commits (watch-commits store)
+          page2   #(cths/get-shape (ths/get-file-from-state %1) %2 :page-label :page2)]
+      (tohs/run-store-async
+       store done [(remap/remap-tokens "radius" "corner")]
+       (fn [state]
+         (t/is (= "corner" (get-in (page2 state :other) [:applied-tokens :r1])))
+         (t/is (= 70 (:r1 (cths/get-shape (ths/get-file-from-state state) :stale))) "the current page")
+         (t/is (= 70 (:r1 (page2 state :other))) "the other pages")
+         (t/is (= 70 (:r1 (page2 state :main-root))))
+         (t/is (= 1 (count (into #{} (keep #(when (:save-undo? % true) (:undo-group %))) @commits)))
+               "one undo step"))))))
 
 (t/deftest the-change-is-saved-and-the-other-pages-are-not
   (t/async
