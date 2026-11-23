@@ -151,9 +151,10 @@
   (let [job-def   (resolve-job-def cfg :export :export-binfile)
         ;; The job runs after the request, so the base its download link
         ;; must use travels in the frozen params instead of a thread binding.
-        base      (-> (meta envelope)
-                      (get :app.http/request)
-                      (:app.http/trusted-origin))
+        base      (when (-> (meta envelope)
+                            (get :app.http/request)
+                            (:app.http/trusted-origin))
+                    (str (cf/get :public-uri)))
         ;; The RPC decoded the public creation params. Validate them against
         ;; the stored job schema before adding the backend-owned base URI.
         params    (cond-> (jobs/validate-params job-def (:params envelope))

@@ -40,12 +40,8 @@
   the browser's `origin` header. Both are checked against the same
   allowlist, so neither can widen the base on its own."
   [request]
-  (let [custom (cf/normalize-origin (yreq/get-header request "x-penpot-origin"))]
-    (if (cf/trusted-origin? custom)
-      custom
-      (let [origin (cf/normalize-origin (yreq/get-header request "origin"))]
-        (when (cf/trusted-origin? origin)
-          origin)))))
+  (or (cf/get-trusted-origin (yreq/get-header request "x-penpot-origin"))
+      (cf/get-trusted-origin (yreq/get-header request "origin"))))
 
 (defn wrap-trusted-origin
   "When the request carries a trusted origin, stamp it on the request and
@@ -55,24 +51,13 @@
   [handler]
   (fn [request]
     (if-let [origin (resolve-trusted-origin request)]
-      (binding [cf/config (cf/with-public-uri origin cf/config)]
+      (binding [cf/config (cf/with-public-origin origin cf/config)]
         (handler (assoc request ::http/trusted-origin origin)))
       (handler request))))
 
-(defn- warn-invalid-trusted-origins!
-  "Log a warning for :trusted-origins entries that are not bare origins.
-  They are inert (fail-closed); the warning only surfaces the typo."
-  []
-  (doseq [origin (cf/get :trusted-origins)
-          :when (not (cf/valid-origin? origin))]
-    (l/wrn :hint "ignoring malformed trusted origin (expected scheme://host[:port])"
-           :origin origin)))
-
 (def trusted-origin
   {:name ::trusted-origin
-   :compile (fn [& _]
-              (warn-invalid-trusted-origins!)
-              wrap-trusted-origin)})
+   :compile (constantly wrap-trusted-origin)})
 
 (def params
   {:name ::params
@@ -337,7 +322,7 @@
         (assoc "access-control-allow-credentials" "true")
         (assoc "access-control-allow-methods" "GET,POST,DELETE,OPTIONS,PUT,HEAD,PATCH")
         (assoc "access-control-expose-headers" "content-type, retry-after, x-rate-limit-remaining, x-rate-limit-reset")
-        (assoc "access-control-allow-headers" "x-frontend-version, x-client, content-type, accept"))))
+        (assoc "access-control-allow-headers" "x-frontend-version, x-client, x-penpot-origin, content-type, accept"))))
 
 (defn wrap-cors
   [handler allowed]

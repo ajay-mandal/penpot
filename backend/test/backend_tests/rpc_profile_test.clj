@@ -2111,13 +2111,13 @@
 ;; Trusted origin on the sensitive email links
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(def ^:private canonical-public-uri "http://localhost:3449")
+(def ^:private canonical-public-uri "http://localhost:3449/penpot")
 
 (def ^:private trusted-link-cases
   [{:headers {"x-penpot-origin" "https://alt.example.com"}
-    :expected "https://alt.example.com"}
+    :expected "https://alt.example.com/penpot"}
    {:headers {"origin" "https://alt.example.com"}
-    :expected "https://alt.example.com"}
+    :expected "https://alt.example.com/penpot"}
    {:headers {"x-penpot-origin" "https://evil.example.com"}
     :expected canonical-public-uri}
    {:headers {"x-penpot-origin" "null"}
@@ -2143,7 +2143,7 @@
                     _    {:target 'app.rpc.commands.auth/elapsed-verify-threshold?
                           :return true}]
          (let [profile (th/create-profile* (inc i) {:is-active true})
-               out     (th/command-through-middleware!
+               out     (th/command-through-middleware
                         {::th/type :request-profile-recovery
                          :email    (:email profile)}
                         {:headers headers})]
@@ -2155,7 +2155,7 @@
     (with-trusted-link-config
       #(with-mocks [mock {:target 'app.email/send-template :return nil}]
          (let [profile (th/create-profile* (inc i))
-               out     (th/command-through-middleware!
+               out     (th/command-through-middleware
                         {::th/type       :request-email-change
                          ::rpc/profile-id (:id profile)
                          :email          (str "changed-" i "@example.com")}
@@ -2174,14 +2174,14 @@
                                          :role :editor
                                          :team-id uuid/zero
                                          :member-email email})
-               prep    (th/command-through-middleware!
+               prep    (th/command-through-middleware
                         {::th/type :prepare-register-profile
                          :invitation-token itoken
                          :fullname "foobar"
                          :email email
                          :password "Foobar12!"}
                         {:headers headers})
-               reg     (th/command-through-middleware!
+               reg     (th/command-through-middleware
                         {::th/type :register-profile
                          :token (:token (:result prep))}
                         {:headers headers})]

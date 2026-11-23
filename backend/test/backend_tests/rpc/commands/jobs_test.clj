@@ -107,7 +107,7 @@
         ;; artifact produced is what proves the call does not wait
         (t/is (= before (count-storage-objects)))))))
 
-(t/deftest create-export-binfile-job-freezes-the-trusted-origin
+(t/deftest create-export-binfile-job-freezes-the-effective-public-uri
   (let [profile (th/create-profile* 1)
         file-id (first (:file-ids (import-fixture! profile)))
         data    {::th/type       :create-export-binfile-job
@@ -115,14 +115,15 @@
                  :params         {:file-ids    #{file-id}
                                   :export-type :detach-libraries}}
         out     (binding [cf/config (assoc cf/config
+                                           :public-uri "https://canonical.example.com/penpot"
                                            :trusted-origins #{"https://alt.example.com"})]
-                  (th/command-through-middleware!
+                  (th/command-through-middleware
                    data {:headers {"x-penpot-origin" "https://alt.example.com"}}))]
     (t/is (th/success? out))
     (let [job      (jobs/get-job th/*system* (:id (:result out)))
           job-def  (jobs/get-job-def (::jobs/defs th/*system*) :export-binfile)
           params   (jobs/decode-params job-def (:params job))]
-      (t/is (= "https://alt.example.com" (:public-uri params))))))
+      (t/is (= "https://alt.example.com/penpot" (:public-uri params))))))
 
 (t/deftest create-export-binfile-job-rejects-client-public-uri
   (let [profile (th/create-profile* 1)

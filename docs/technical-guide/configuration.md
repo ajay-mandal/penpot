@@ -123,11 +123,14 @@ To configure the authentication with third-party auth providers you will need to
 configure Penpot and set the correct callback of your Penpot instance in the auth-provider
 configuration.
 
-The callback has the following format:
+Append `api/auth/oidc/callback` to the public URL with a single `/` between
+them. Register the exact URL, including any configured subpath:
 
-```html
-https://<your_domain>/api/auth/oidc/callback
-```
+- Public URL `https://mycompany.com/`: `https://mycompany.com/api/auth/oidc/callback`
+- Public URL `https://mycompany.com/penpot/`: `https://mycompany.com/penpot/api/auth/oidc/callback`
+
+If you configure [trusted alternate origins](#trusted-alternate-origins), register
+the callback for each alias as well.
 
 #### Google
 
@@ -413,9 +416,10 @@ Existing bookmarks and integrations that use the previous root URL must be
 updated. You may also configure a redirect from the previous URL. If the scheme
 or hostname changes in addition to the path, review your authentication provider
 callback URLs and cookie settings. Active users may need to sign in again.
-After upgrading, register `<public-uri>/api/auth/oidc/callback` at the identity
-provider even when the scheme and hostname stay the same: the callback now keeps
-the configured subpath.
+After upgrading, register the callback with the subpath at the identity provider
+even when the scheme and hostname stay the same. For example, register
+`https://mycompany.com/penpot/api/auth/oidc/callback` for
+`https://mycompany.com/penpot/`.
 
 <p class="advice">
     If you plan to serve Penpot under different domain than `localhost` without HTTPS,
@@ -427,42 +431,56 @@ the configured subpath.
 
 ### Trusted alternate origins
 
-When Penpot is served on an alternate domain (a temporary deployment, a canary, or a
-migration between domains) while `PENPOT_PUBLIC_URI` still points at the canonical
-domain, the backend keeps building absolute links from `PENPOT_PUBLIC_URI`. Users
-browsing the alternate domain then get links (for example in invitation emails) that
-send them to the canonical deployment.
-
-`PENPOT_TRUSTED_ORIGINS` lets operators list the alternate origins the backend may use
-instead. The frontend sends its own origin in the `X-Penpot-Origin` header on every
-`/api` request made through the shared client, including the `get-*` reads where the
-browser does not send `Origin`. The backend uses that header only when it matches the
-list; otherwise it falls back to the browser's `Origin` header, and finally to
-`PENPOT_PUBLIC_URI`. Links generated while serving the request (transactional emails,
-asset URLs, audit and webhook link fields, and redirects) use that base. A top-level
-navigation cannot carry a custom header: the OIDC callback instead reuses the origin
-stored in the signed state, and MCP OAuth always uses the canonical base. Removing an
-origin from the list does not invalidate OIDC states already signed with it; they keep
-using it until they expire (up to four hours).
+By default, the backend builds absolute links from `PENPOT_PUBLIC_URI`, even
+when users open Penpot on an alternate domain. Set `PENPOT_TRUSTED_ORIGINS` on
+the backend to let links from those requests use an alternate origin instead.
 
 ```bash
 # Backend
-PENPOT_TRUSTED_ORIGINS: https://alt.penpot.mycompany.com, https://staging.penpot.mycompany.com
+PENPOT_TRUSTED_ORIGINS: https://alt.mycompany.com, https://design.mycompany.com
 ```
 
-- The value is a comma or whitespace separated list of bare origins
-  (`scheme://host[:port]`). Paths are not supported; malformed entries are ignored
-  and a warning is logged at startup.
-- The setting is configured on the backend only; no frontend setting is needed.
-  With no value, behavior is unchanged (fail-closed).
-- Each alternate origin must register its own OIDC callback URL
-  (`https://<origin>/api/auth/oidc/callback`) at the identity provider. If you use SSO
-  logout, its post-logout redirect URL must be registered as well.
-- SSE streams keep the base of the request that opened them. The export job stores
-  that base when it is created and uses it for the download link, because the job
-  runs outside the request. Other notifications sent later by background workers
-  keep the canonical `PENPOT_PUBLIC_URI`, and so do server-to-server calls (for
-  example the management API) that carry no origin.
+**Only list aliases that you operate and that serve the same Penpot installation
+at the same public path.** A matching request can put the alias in an invitation
+or password reset link. Use HTTPS in production and remove aliases from the list
+before you stop operating them.
+
+- Separate entries with commas or whitespace. Each is a bare HTTP(S) origin
+  (`scheme://host[:port]`): no path (not even a trailing slash), query, fragment,
+  credentials, or wildcard. Matching ignores case and surrounding whitespace.
+  HTTPS with or without `:443` matches the same origin, as does HTTP with or
+  without `:80`. Other ports must match exactly.
+- At startup, the backend warns about and ignores invalid entries. It also logs
+  one warning if the list contains any valid HTTP origin whose hostname is not
+  `localhost`. Those HTTP entries still work; they do not change the secure
+  session cookie flags.
+- The backend uses `X-Penpot-Origin` if it matches the list, then tries `Origin`.
+  If neither matches, it uses `PENPOT_PUBLIC_URI`. The frontend sends
+  `X-Penpot-Origin` on shared-client API calls, including reads without `Origin`;
+  it needs no extra setting. The chosen alias replaces only the scheme, host,
+  and port. Links keep the path configured in `PENPOT_PUBLIC_URI`.
+- This list does not grant cross-origin browser access. With `enable-cors`,
+  `PENPOT_ALLOWED_ORIGINS` separately controls which origins may make CORS
+  requests. Listing an origin in either setting does not add it to the other.
+
+Register the exact OIDC callback URL for the canonical base and for each alias
+at the identity provider. For example, with `PENPOT_PUBLIC_URI` set to
+`https://mycompany.com/penpot/` and `https://alt.mycompany.com` in the list, register
+both `https://mycompany.com/penpot/api/auth/oidc/callback` and
+`https://alt.mycompany.com/penpot/api/auth/oidc/callback`. If you use SSO logout,
+register the post-logout redirect URL as well. The OIDC callback reuses the
+origin from the signed login state and combines it with the configured path.
+Removing an alias does not invalidate state already signed with it; that state
+expires within four hours. If you change the configured path during a login,
+the user may need to start again. MCP OAuth always uses the canonical base.
+
+Server-sent events (SSE) keep the full base of the request that opened the stream.
+An export requested through a trusted alias saves the full base in the job's
+parameters for the download link. Without an alias, the export worker uses its
+canonical base. Templated emails save the request's base in the template data
+and the worker uses it when it renders the email. Workers that build new links
+without a saved request base use the canonical `PENPOT_PUBLIC_URI`, as do
+server-to-server calls with no matching origin.
 
 ## Email configuration
 

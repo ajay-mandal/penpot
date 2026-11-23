@@ -31,11 +31,12 @@ x-flags: &penpot-flags
 ## front must forward the subpath unchanged, without rewriting it.
 x-uri: &penpot-public-uri
   PENPOT_PUBLIC_URI: http://localhost:9001
-  ## Optional: alternate origins the backend may use as the base for generated
-  ## links (emails, assets, redirects) when a request Origin matches. Bare
-  ## origins only, comma/whitespace separated; each must register its OIDC
-  ## callback URL (https://<origin>/api/auth/oidc/callback) at the IdP.
-  # PENPOT_TRUSTED_ORIGINS: https://alt.example.com, https://staging.example.com
+  ## Optional: alternate origins for backend-generated links, including email.
+  ## List only aliases you operate for the same Penpot installation and public
+  ## path. Use HTTPS in production. List bare origins (no path), separated by
+  ## commas or whitespace. Register the OIDC callback for each alias, including
+  ## the public subpath, if any. This setting does not grant CORS access.
+  # PENPOT_TRUSTED_ORIGINS: https://alt.mycompany.com, https://design.mycompany.com
 
 x-body-size: &penpot-http-body-size
   # Max body size

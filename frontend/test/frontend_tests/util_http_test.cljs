@@ -98,5 +98,6 @@
           omitted-headers (aget (second @requests) "headers")]
       (t/is (= (.-origin ^js globals/location)
                (aget default-headers "x-penpot-origin")))
-      (t/is (nil? (aget omitted-headers "x-penpot-origin")))
-      (t/is (nil? (aget omitted-headers "x-frontend-version"))))))
+      (doseq [header ["x-penpot-origin" "x-frontend-version" "x-client"]]
+        (t/is (js/Object.hasOwn default-headers header) header)
+        (t/is (not (js/Object.hasOwn omitted-headers header)) header)))))

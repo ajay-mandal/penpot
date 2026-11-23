@@ -197,12 +197,20 @@
   (let [handler (#'app.http.middleware/wrap-cors
                  (fn [_] {::yres/status 200 ::yres/headers {}})
                  #{"https://trusted.example"})
-        resp    (handler (->MethodAwareDummyRequest :options {"origin" "https://trusted.example"}))
-        headers (::yres/headers resp)]
+        resp    (handler (->MethodAwareDummyRequest
+                          :options
+                          {"origin" "https://trusted.example"
+                           "access-control-request-headers"
+                           "x-frontend-version, x-client, x-penpot-origin, content-type, x-unrecognized"}))
+        headers (::yres/headers resp)
+        allowed (into #{} (map str/trim)
+                      (str/split (get headers "access-control-allow-headers" "") #","))]
 
     (t/is (= 204 (::yres/status resp)))
     (t/is (= "https://trusted.example" (get headers "access-control-allow-origin")))
-    (t/is (= "true" (get headers "access-control-allow-credentials")))))
+    (t/is (= "true" (get headers "access-control-allow-credentials")))
+    (t/is (= #{"x-frontend-version" "x-client" "x-penpot-origin" "content-type" "accept"}
+             allowed))))
 
 (t/deftest cors-middleware-preflight-non-allowlisted
   (let [handler (#'app.http.middleware/wrap-cors
@@ -771,8 +779,7 @@
     (with-redefs [cf/config (assoc cf/config
                                    :public-uri "http://localhost:3449"
                                    :trusted-origins #{"https://alt.example.com"
-                                                      "https://other.example.com"
-                                                      "null"})]
+                                                      "https://other.example.com"})]
       (t/testing "trusted origin overrides the public base and stamps the request"
         (reset! seen nil)
         (handler (th/make-dummy-request {:headers {"origin" "https://alt.example.com"}}))
@@ -815,7 +822,7 @@
                                                    "origin" "https://other.example.com"}}))
         (t/is (= "https://other.example.com" (str (:public-uri @seen)))))
 
-      (t/testing "a listed null custom header never matches"
+      (t/testing "a null custom header never matches"
         (reset! seen nil)
         (handler (th/make-dummy-request {:headers {"x-penpot-origin" "null"}}))
         (t/is (= "http://localhost:3449" (str (:public-uri @seen))))
@@ -824,6 +831,22 @@
       (t/testing "the binding does not leak past the request"
         (handler (th/make-dummy-request {:headers {"origin" "https://alt.example.com"}}))
         (t/is (= "http://localhost:3449" (str (cf/get :public-uri))))))))
+
+(t/deftest trusted-origin-middleware-preserves-the-public-path
+  (let [handler (mw/wrap-trusted-origin
+                 (fn [request]
+                   [(:app.http/trusted-origin request)
+                    (cf/get-public-uri "assets/by-id/example")]))]
+    (doseq [path ["/penpot" "/penpot/"]]
+      (binding [cf/config (assoc cf/config
+                                 :public-uri (str "http://localhost:3449" path)
+                                 :trusted-origins #{"https://alt.example.com"})]
+        (t/is (= ["https://alt.example.com" "https://alt.example.com/penpot/assets/by-id/example"]
+                 (handler (th/make-dummy-request
+                           {:headers {"x-penpot-origin" "HTTPS://ALT.EXAMPLE.COM:443"}}))))
+        (t/is (= [nil "http://localhost:3449/penpot/assets/by-id/example"]
+                 (handler (th/make-dummy-request
+                           {:headers {"origin" "https://other.example.com"}}))))))))
 
 (t/deftest root-middleware-registers-trusted-origin-before-auth
   ;; The feature only works if `mw/trusted-origin` is part of the root chain
