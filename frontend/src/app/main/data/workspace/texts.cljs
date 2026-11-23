@@ -335,7 +335,7 @@
                              (assoc :name name))
                            (cond-> (some? new-size)
                              (gsh/transform-shape
-                              (ctm/change-size shape (:width new-size) (:height new-size))))))
+                              (dwwt/text-resize-modifiers shape content new-size)))))
                      {:undo-group (when new-shape? id)})))))
 
               (let [content (d/merge (ted/export-content content)
