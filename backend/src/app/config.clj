@@ -620,9 +620,9 @@
     config))
 
 (defn with-public-uri
-  "Returns a copy of `config` with :public-uri replaced by `base` as a URI.
-  When `base` is nil the config is returned unchanged, so callers can use
-  it for requests (or tokens) without a trusted origin."
+  "Replace the full :public-uri with an already resolved `base`, as used
+  by export jobs. Leave `config` unchanged when `base` is nil. Use
+  `with-public-origin` to change only the origin and keep the public path."
   [base config]
   (if (some? base)
     (assoc config :public-uri (u/uri base))
