@@ -45,7 +45,7 @@ Workspace behavior:
 - Workspace token application/propagation: `mem:frontend/workspace-token-subtleties`; shared token data/schema: `mem:common/tokens-schema-subtleties`.
 
 App shell and product flows:
-- Routing, root app shell, websocket, and global errors: `mem:frontend/routing-app-shell-subtleties`.
+- Public URI selection for a shared frontend on trusted alternate origins, routing, root app shell, websocket, and global errors: `mem:frontend/routing-app-shell-subtleties`.
 - Authentication events, the session origin vocabulary, and the invitation flow: `mem:frontend/auth-events`.
 - Dashboard and viewer flows: `mem:frontend/dashboard-viewer-subtleties`.
 - Plugin JS API runtime inside the frontend app: `mem:frontend/plugin-api-to-cljs-binding`.

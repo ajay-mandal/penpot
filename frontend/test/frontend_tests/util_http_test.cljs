@@ -6,7 +6,6 @@
 
 (ns frontend-tests.util-http-test
   (:require
-   [app.util.globals :as globals]
    [app.util.http :as http]
    [cljs.test :as t :include-macros true]
    [frontend-tests.helpers.async :as async]
@@ -76,11 +75,6 @@
   (t/testing "Other TypeErrors are not network failures"
     (t/is (false? (http/network-failure? (make-error "TypeError" "x is not a function"))))))
 
-(t/deftest default-headers-carry-the-browser-origin
-  (t/testing "every request with default headers carries the browser origin"
-    (t/is (= (.-origin ^js globals/location)
-             (get (http/default-headers) "x-penpot-origin")))))
-
 (t/deftest ^:async fetch-respects-omit-default-headers
   (let [requests (atom [])
         original (http-mock/install-fetch-mock!
@@ -96,8 +90,8 @@
         (http-mock/restore-fetch! original)))
     (let [default-headers (aget (first @requests) "headers")
           omitted-headers (aget (second @requests) "headers")]
-      (t/is (= (.-origin ^js globals/location)
-               (aget default-headers "x-penpot-origin")))
-      (doseq [header ["x-penpot-origin" "x-frontend-version" "x-client"]]
+      (t/is (not (js/Object.hasOwn default-headers "x-penpot-origin")))
+      (t/is (not (js/Object.hasOwn omitted-headers "x-penpot-origin")))
+      (doseq [header ["x-frontend-version" "x-client"]]
         (t/is (js/Object.hasOwn default-headers header) header)
         (t/is (not (js/Object.hasOwn omitted-headers header)) header)))))
