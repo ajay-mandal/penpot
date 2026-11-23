@@ -238,8 +238,7 @@
    [:label {:optional true} ::sm/text]
    [:session-id {:optional true} ::sm/uuid]
    [:modified-at {:optional true} ::ct/inst]
-   [:deleted-at {:optional true} ::ct/inst]
-   [::audit-via-update-file {:optional true} :boolean]])
+   [:deleted-at {:optional true} ::ct/inst]])
 
 (def ^:private check-create-params
   (sm/check-fn schema:create-params))
@@ -262,7 +261,7 @@
 
 (defn- create-snapshot
   [cfg file params]
-  (let [{:keys [label created-by deleted-at profile-id session-id ::audit-via-update-file]}
+  (let [{:keys [label created-by deleted-at profile-id session-id]}
         (check-create-params params)
 
         file
@@ -324,14 +323,13 @@
                     :created-at created-at
                     :deleted-at deleted-at})
 
-    (when (and cf/audit-persist? (not audit-via-update-file))
+    (when cf/audit-persist?
       (emit-snapshot-created-after-commit cfg (:id file) snapshot-id profile-id))
 
     snapshot))
 
 (defn create!
-  "Create a file snapshot; expects a non-encoded file. When the caller is
-   update-file, it reports the new ID in its own audit event."
+  "Create a file snapshot from a non-encoded file and report it after commit."
   [cfg file & {:as params}]
   (db/tx-run! cfg create-snapshot file params))
 

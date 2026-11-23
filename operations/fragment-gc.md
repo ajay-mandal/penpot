@@ -22,8 +22,11 @@ offload do not change.
    the buffer until it comes back. Do not delete the cursor to catch up.
 
 The ordinary replay processes events still in the buffer. It does not
-reconstruct purged events. Once marking is enabled, a GC job that finds an
-unindexed change repairs the missing rows in batches and tries again.
+reconstruct purged events. A save reports its own revision and the common
+snapshot writer reports each snapshot separately after commit. Other
+history entries, such as the extra auto-repair revision, are indexed on
+demand: once marking is enabled, a GC job that finds an unindexed change
+repairs the missing rows in batches and tries again.
 Corrupt or unreadable snapshots leave that file uncovered; check the failed
 job and source data rather than filling in an empty array.
 

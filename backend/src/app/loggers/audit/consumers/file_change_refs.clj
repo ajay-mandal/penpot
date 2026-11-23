@@ -19,7 +19,7 @@
   [row]
   (when (= "backend" (:source row))
     (let [{:keys [name props context]} (consumers/decode-row row)
-          {:keys [file-change-id file-change-ids outcome]} props]
+          {:keys [file-change-id outcome]} props]
       ;; Management ingest also uses source "backend", but the server
       ;; stamps its authenticated shared-key identity as initiator.
       (when (= "app" (:initiator context))
@@ -30,14 +30,12 @@
                      (contains? #{"saved" "partial"} outcome))
             {:file-id (:id props)
              :save true
-             :change-ids (into [file-change-id]
-                               (filter uuid?)
-                               (when (vector? file-change-ids) file-change-ids))})
+             :change-id file-change-id})
 
           "file-change-created"
           (when (and (uuid? (:file-id props)) (uuid? file-change-id))
             {:file-id (:file-id props)
-             :change-ids [file-change-id]})
+             :change-id file-change-id})
 
           nil)))))
 
@@ -48,7 +46,7 @@
     ;; Do not resolve snapshot payloads while the transaction owns the
     ;; cursor. Its only writes are durable work and the cursor itself.
     (doseq [[file-id entries] (group-by :file-id work)
-            ids (partition-all refs/max-change-ids (distinct (mapcat :change-ids entries)))]
+            ids (partition-all refs/max-change-ids (distinct (map :change-id entries)))]
       (jobs/submit cfg {::jobs/name :index-file-change-refs
                         ::jobs/params {:file-id file-id :change-ids (vec ids)}}))
     (when (and (seq saves) (fragments-gc/marking-enabled? cfg))
