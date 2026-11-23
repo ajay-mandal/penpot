@@ -659,6 +659,9 @@
     :run-webhook           (ig/ref ::webhooks/run-webhook-job-def)
     :process-webhook-event (ig/ref ::webhooks/process-webhook-event-job-def)
     :file-gc               (ig/ref :app.tasks.file-gc/job-def)
+    :fragments-gc          (ig/ref :app.tasks.fragments-gc/job-def)
+    :index-file-change-refs (ig/ref :app.tasks.file-change-refs/index-job-def)
+    :repair-file-change-refs (ig/ref :app.tasks.file-change-refs/repair-job-def)
     :offload-file-data     (ig/ref :app.tasks.offload-file-data/job-def)
     :objects-gc            (ig/ref :app.tasks.objects-gc/job-def)
     :export-binfile        (ig/ref :app.tasks.export-binfile/job-def)
@@ -761,6 +764,21 @@
 
    :app.tasks.file-gc-scheduler/job-def
    {::db/pool     (ig/ref ::db/pool)
+    ::mtx/metrics (ig/ref ::mtx/metrics)}
+
+   :app.tasks.fragments-gc/job-def
+   {::db/pool     (ig/ref ::db/pool)
+    ::sto/storage (ig/ref ::sto/storage)
+    ::mtx/metrics (ig/ref ::mtx/metrics)}
+
+   :app.tasks.file-change-refs/index-job-def
+   {::db/pool     (ig/ref ::db/pool)
+    ::sto/storage (ig/ref ::sto/storage)
+    ::mtx/metrics (ig/ref ::mtx/metrics)}
+
+   :app.tasks.file-change-refs/repair-job-def
+   {::db/pool     (ig/ref ::db/pool)
+    ::sto/storage (ig/ref ::sto/storage)
     ::mtx/metrics (ig/ref ::mtx/metrics)}
 
    :app.loggers.audit.gc/job-def
@@ -957,6 +975,11 @@
    {::db/pool            (ig/ref ::db/pool)
     :app.nitrate/client  (ig/ref :app.nitrate/client)
     ::mtx/metrics        (ig/ref ::mtx/metrics)}
+
+   :app.loggers.audit.consumers.file-change-refs/consumer
+   {::db/pool     (ig/ref ::db/pool)
+    ::jobs/defs   (ig/ref ::jobs/defs)
+    ::mtx/metrics (ig/ref ::mtx/metrics)}
 
    :app.loggers.audit.consumers.telemetry/consumer
    {::db/pool            (ig/ref ::db/pool)

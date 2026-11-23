@@ -13,7 +13,8 @@
    [app.common.logging :as l]
    [app.common.uuid :as uuid]
    [app.config :as cf]
-   [app.loggers.audit :as-alias audit]
+   [app.db :as db]
+   [app.loggers.audit :as audit]
    [app.msgbus :as mbus]
    [app.rpc :as-alias rpc]
    [app.util.blob :as blob]
@@ -166,12 +167,18 @@
                                         params)))
         props (fn [out] (::audit/replace-props (meta out)))]
 
-    (t/testing "a save that writes the revision carries its id"
-      (let [out (save! {:revn 0
-                        :changes [(th/add-rect-change page-id shape)]})
-            id  (:file-change-id (props out))]
+    (t/testing "a save carries the ids of its revision and automatic snapshot"
+      (let [out      (th/with-audit-config (conj cf/flags :nexus)
+                       (save! {:revn 0
+                               :changes [(th/add-rect-change page-id shape)]}))
+            id       (:file-change-id (props out))
+            snapshot (th/db-get :file-change {:file-id file-id :label "internal/snapshot/0"}
+                                {::db/remove-deleted false})]
         (t/is (uuid? id))
         (t/is (= [id] (mapv :id (th/db-query :file-change {:id id}))))
+        (t/is (uuid? (:id snapshot)))
+        (t/is (= [(:id snapshot)] (:file-change-ids (audit/clean-props (props out)))))
+        (t/is (empty? (th/db-query :audit-log {:name "file-change-created"})))
         (t/is (= "saved" (:outcome (props out))))
         (t/is (inst? (:modified-at (props out))))))
 
@@ -184,22 +191,33 @@
         (t/is (= 1 (:revn (th/db-get :file {:id file-id}))))
         (t/is (= 1 (count (get-file-changes ctx))))
         (t/is (not (contains? (props out) :file-change-id)))
+        (t/is (not (contains? (props out) :file-change-ids)))
         (t/is (= "rejected" (:outcome (props out))))
         ;; The rejected save does not persist: the event mirrors the row.
         (t/is (= (inst-ms (:modified-at (th/db-get :file {:id file-id})))
                  (inst-ms (:modified-at (props out)))))))
 
-    (t/testing "a partially rejected save says so and carries the id"
+    (t/testing "a partially rejected save also carries its revision and snapshot ids"
       (let [commit1 (commit (th/add-rect-change page-id (uuid/next)))
             commit2 (commit (conflicting-page-change))
             out     (save! {:revn 1
                             :changes-with-metadata [commit1 commit2]})
-            row     (th/db-get :file {:id file-id})]
+            row     (th/db-get :file {:id file-id})
+            snapshot (th/db-get :file-change {:file-id file-id :label "internal/snapshot/1"}
+                                {::db/remove-deleted false})]
         (t/is (some? (:rejected out)))
         (t/is (= "partial" (:outcome (props out))))
         (t/is (uuid? (:file-change-id (props out))))
+        (t/is (uuid? (:id snapshot)))
+        (t/is (= [(:id snapshot)] (:file-change-ids (props out))))
         (t/is (= (inst-ms (:modified-at row))
-                 (inst-ms (:modified-at (props out)))))))))
+                 (inst-ms (:modified-at (props out)))))))
+
+    (t/testing "a save without a snapshot omits the optional vector"
+      (let [out (with-redefs [cf/flags (disj cf/flags :auto-file-snapshot)]
+                  (save! {:revn 2 :changes []}))]
+        (t/is (uuid? (:file-change-id (props out))))
+        (t/is (not (contains? (props out) :file-change-ids)))))))
 
 (t/deftest rejects-a-commit-that-throws-while-applied
   (let [{:keys [page-id] :as ctx} (create-file)

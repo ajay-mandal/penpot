@@ -23,8 +23,10 @@
    [app.features.fdata :as fdata]
    [app.features.file-snapshots :as fsnap]
    [app.http :as http]
+   [app.loggers.audit :as audit]
    [app.msgbus :as mbus]
    [app.rpc :as-alias rpc]
+   [app.srepl.helpers :as srepl]
    [app.storage :as sto]
    [backend-tests.helpers :as th]
    [clojure.set :as set]
@@ -48,6 +50,116 @@
     ;; (th/print-result! out)
     (t/is (nil? (:error out)))
     (:result out)))
+
+(defn- snapshot-events
+  [cfg]
+  (mapv (fn [event]
+          (-> event
+              (select-keys [:source :profile-id :props :context])
+              (update :props db/decode-transit-pgobject)
+              (update :context db/decode-transit-pgobject)))
+        (db/query cfg :audit-log {:name "file-change-created"})))
+
+(t/deftest manual-snapshot-emits-a-file-change-event
+  (th/with-audit-config (conj cf/flags :nexus)
+    (let [profile (th/create-profile* 1)
+          file    (th/create-file* 1 {:profile-id (:id profile)
+                                      :project-id (:default-project-id profile)})
+          file-id (:id file)
+          out     (th/command! {::th/type :create-file-snapshot
+                                ::rpc/profile-id (:id profile)
+                                :file-id file-id
+                                :label "pinned"})
+          snap-id (get-in out [:result :id])]
+      (t/is (th/success? out))
+      (t/is (uuid? snap-id))
+      (t/is (= (:revn file) (:revn (th/db-get :file {:id file-id}))))
+      (t/is (= [{:source "backend"
+                 :profile-id (:id profile)
+                 :props {:file-id file-id :file-change-id snap-id}
+                 :context {:initiator "app"}}]
+               (snapshot-events th/*system*))))))
+
+(t/deftest failed-restore-emits-the-committed-backup-event
+  (th/with-audit-config (conj cf/flags :nexus)
+    (let [profile  (th/create-profile* 1)
+          file     (th/create-file* 1 {:profile-id (:id profile)
+                                       :project-id (:default-project-id profile)})
+          file-id  (:id file)
+          out      (th/command! {::th/type :restore-file-snapshot
+                                 ::rpc/profile-id (:id profile)
+                                 :file-id file-id
+                                 :id (uuid/random)})
+          [backup] (th/db-query :file-change {:file-id file-id} {::db/remove-deleted false})]
+      (t/is (th/ex-of-code? (:error out) :snapshot-not-found))
+      (t/is (= (:revn file) (:revn (th/db-get :file {:id file-id}))))
+      (t/is (= "system" (:created-by backup)))
+      (t/is (map? (:data (fsnap/get-snapshot th/*system* file-id (:id backup)))))
+      (t/is (= [{:source "backend"
+                 :profile-id (:id profile)
+                 :props {:file-id file-id :file-change-id (:id backup)}
+                 :context {:initiator "app"}}]
+               (snapshot-events th/*system*))))))
+
+(t/deftest audit-failure-does-not-prevent-restore-or-lose-the-backup
+  (th/with-audit-config (conj cf/flags :nexus)
+    (let [profile (th/create-profile* 1)
+          file    (th/create-file* 1 {:profile-id (:id profile)
+                                      :project-id (:default-project-id profile)})
+          file-id (:id file)
+          snap-id (get-in (th/command! {::th/type :create-file-snapshot
+                                        ::rpc/profile-id (:id profile)
+                                        :file-id file-id
+                                        :label "pinned"}) [:result :id])
+          out     (with-redefs [audit/insert
+                                (fn [_cfg _event]
+                                  (throw (ex-info "audit write failed" {})))]
+                    (th/command! {::th/type :restore-file-snapshot
+                                  ::rpc/profile-id (:id profile)
+                                  :file-id file-id
+                                  :id snap-id}))
+          backup  (th/db-get :file-change {:file-id file-id :created-by "system"}
+                             {::db/remove-deleted false})]
+      (t/is (th/success? out))
+      (t/is (= (inc (:revn file)) (:revn (th/db-get :file {:id file-id}))))
+      (t/is (map? (:data (fsnap/get-snapshot th/*system* file-id (:id backup)))))
+      (t/is (= [snap-id]
+               (mapv #(get-in % [:props :file-change-id]) (snapshot-events th/*system*)))))))
+
+(t/deftest srepl-snapshot-event-follows-the-writers-transaction
+  (th/with-audit-config (conj cf/flags :nexus)
+    (let [profile (th/create-profile* 1)
+          file    (th/create-file* 1 {:profile-id (:id profile)
+                                      :project-id (:default-project-id profile)})
+          file-id (:id file)
+          process (fn [cfg]
+                    (srepl/process-file! cfg file-id #(assoc %1 :name (:name %2))
+                                         {:name "SREPL edit"
+                                          ::srepl/profile-id (:id profile)
+                                          ::srepl/snapshot-label "before SREPL edit"}))]
+      (with-open [conn (db/open th/*pool*)]
+        ;; Exercise the effective SREPL writer with a caller-owned connection
+        ;; and no pool in its cfg. No event may be written inside the edit.
+        (let [cfg (-> th/*system* (dissoc ::db/pool) (assoc ::db/conn conn))]
+          (db/tx-run! (assoc cfg ::db/rollback true)
+                      (fn [tx]
+                        (t/is (true? (process tx)))
+                        (t/is (empty? (snapshot-events tx)))))
+          (t/is (empty? (snapshot-events cfg)))
+          (t/is (empty? (th/db-query :file-change {:file-id file-id}
+                                     {::db/remove-deleted false})))
+          (db/tx-run! cfg
+                      (fn [tx]
+                        (t/is (true? (process tx)))
+                        (t/is (empty? (snapshot-events tx)))))))
+      (let [backup (th/db-get :file-change {:file-id file-id :label "before SREPL edit"}
+                              {::db/remove-deleted false})]
+        (t/is (= "SREPL edit" (:name (th/db-get :file {:id file-id}))))
+        (t/is (= [{:source "backend"
+                   :profile-id (:id profile)
+                   :props {:file-id file-id :file-change-id (:id backup)}
+                   :context {:initiator "app"}}]
+                 (snapshot-events th/*system*)))))))
 
 (t/deftest snapshots-crud
   (let [profile (th/create-profile* 1 {:is-active true})
@@ -423,7 +535,8 @@
                                    :label "pinned"}))]
     (t/is (nil? (:error out)))
     (t/is (uuid? (get-in out [:result :id])))
-    (t/is (= [(str bfc/sql:get-file " FOR UPDATE of f")]
+    (t/is (= [(str bfc/sql:get-minimal-file " FOR UPDATE of f")
+              bfc/sql:get-file]
              sqls))))
 
 (t/deftest restore-backup-reads-the-file-row-for-update
@@ -444,7 +557,10 @@
                                    :file-id (:id file)
                                    :id snap-id}))]
     (t/is (nil? (:error out)))
-    (t/is (some #(= (str bfc/sql:get-file " FOR UPDATE of f") %) sqls))
+    (t/is (some #(= [(str bfc/sql:get-minimal-file " FOR UPDATE of f")
+                     bfc/sql:get-file]
+                    %)
+                (partition 2 1 sqls)))
     (t/is (not-any? #(str/includes? % "FOR SHARE") sqls))))
 
 (t/deftest snapshot-creation-serializes-with-file-gc

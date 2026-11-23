@@ -20,6 +20,7 @@
    [app.config :as cf]
    [app.db :as db]
    [app.features.file-snapshots :as fsnap]
+   [app.loggers.audit :as-alias audit]
    [app.metrics :as mtx]
    [app.msgbus :as mbus]
    [app.rpc :as-alias rpc]
@@ -169,14 +170,17 @@
             n                (:revn broken)
             before-repaired  (repair-count :repaired)
             before-unrepaired (repair-count :unrepaired)
-            out              (update-file (:id profile) file-id n
-                                          [(set-attr page-id shape-b :name "renamed")])
+            out              (th/with-audit-config (conj cf/flags :nexus)
+                               (update-file (:id profile) file-id n
+                                            [(set-attr page-id shape-b :name "renamed")]))
             stored           (stored-file file-id)
             shape            (get-in stored [:data :pages-index page-id :objects shape-a])
             frame            (get-in stored [:data :pages-index page-id :objects (:frame-id shape)])
             labels           (label-rows file-id)
             repair           (filter #(= (str "internal/repair/" n) (:label %)) labels)
-            snap             (filter #(= (str "internal/snapshot/" n) (:label %)) labels)]
+            snap             (filter #(= (str "internal/snapshot/" n) (:label %)) labels)
+            [repair-revision save-revision] (filter #(> (:revn %) n) (change-rows file-id))
+            props            (::audit/replace-props (meta (:result out)))]
         (t/is (th/success? out))
         (t/is (nil? (cfv/validate-file stored {})))
         (t/is (some? frame))
@@ -185,6 +189,9 @@
         (t/is (= (+ n 2) (:revn stored)))
         (t/is (= 1 (count repair)))
         (t/is (zero? (count snap)))
+        (t/is (= (:id save-revision) (:file-change-id props)))
+        (t/is (= [(:id (first repair)) (:id repair-revision)] (:file-change-ids props)))
+        (t/is (empty? (th/db-query :audit-log {:name "file-change-created"})))
         (t/is (= 1.0 (- (repair-count :repaired) before-repaired)))
         (t/is (= 0.0 (- (repair-count :unrepaired) before-unrepaired)))))))
 

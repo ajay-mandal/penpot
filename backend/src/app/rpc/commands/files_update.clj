@@ -336,6 +336,7 @@
           ;; A request whose first commit is rejected leaves the file as is
           saved?   (or (nil? rejected) (seq changes))
           snapshot (when saved? (::snapshot file))
+          repair   (when saved? (::repair file))
 
           deleted-at
           (ct/plus timestamp (ct/duration {:hours 1}))
@@ -346,38 +347,32 @@
           file-change-id
           (uuid/next)
 
-          repair
-          (::repair file)
-
           snapshot-deleted-at
           (ct/plus timestamp (ldel/get-deletion-delay team))
 
           change-created-at
           (cond-> timestamp
             repair
-            (ct/plus (ct/duration {:millis 1})))]
+            (ct/plus (ct/duration {:millis 1})))
 
-      (if repair
-        (let [snapshot-file (or snapshot
-                                (fdata/realize cfg (:original repair)))]
-          (fsnap/create! cfg snapshot-file
-                         {:label (str "internal/repair/" revn)
-                          :created-by "system"
-                          :deleted-at snapshot-deleted-at
-                          :profile-id profile-id
-                          :session-id repair-session-id}))
-        (when snapshot
-          (fsnap/create! cfg snapshot
-                         {:label (str "internal/snapshot/" revn)
-                          :created-by "system"
-                          :deleted-at snapshot-deleted-at
-                          :profile-id profile-id
-                          :session-id session-id})))
+          snapshot-id
+          (when-let [snapshot-file (or snapshot
+                                       (when repair (fdata/realize cfg (:original repair))))]
+            (:id (fsnap/create! cfg snapshot-file
+                                {:label (str (if repair "internal/repair/" "internal/snapshot/") revn)
+                                 :created-by "system"
+                                 :deleted-at snapshot-deleted-at
+                                 :profile-id profile-id
+                                 :session-id (if repair repair-session-id session-id)
+                                 ::fsnap/audit-via-update-file true})))
+
+          repair-change-id
+          (when repair (uuid/next))]
 
       (when saved?
         (when repair
           (db/insert! conn :file-change
-                      {:id (uuid/next)
+                      {:id repair-change-id
                        :kind fchanges/revision-kind
                        :session-id repair-session-id
                        :profile-id profile-id
@@ -458,7 +453,12 @@
            ;; save writes no row, and an id that resolves to nothing cannot
            ;; be told apart from one the GC already purged.
            saved?
-           (assoc :file-change-id file-change-id))}))))
+           (assoc :file-change-id file-change-id)
+
+           (or snapshot-id repair-change-id)
+           (assoc :file-change-ids (cond-> []
+                                     snapshot-id (conj snapshot-id)
+                                     repair-change-id (conj repair-change-id))))}))))
 
 (defn get-file
   "Get not-decoded file, only decodes the features set.

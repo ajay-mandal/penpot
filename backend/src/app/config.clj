@@ -215,6 +215,7 @@
 
     [:deletion-delay {:optional true} ::ct/duration]
     [:file-clean-delay {:optional true} ::ct/duration]
+    [:fragments-gc-enabled {:optional true} :boolean]
     [:jobs-lease {:optional true} ::ct/duration]
     [:jobs-retention {:optional true} ::ct/duration]
     [:jobs-user-ttl {:optional true} ::ct/duration]
@@ -396,18 +397,16 @@
                       ;; When telemetry-enabled config is true, add :telemetry flag
                       (true? (c/get config :telemetry-enabled))
                       (conj :enable-telemetry))]
-    ;; :audit-log is no longer configurable: persistence follows the
-    ;; consumer flags, so a stale enable-audit-log in the environment is
-    ;; dropped instead of lingering in the set as a misleading no-op.
+    ;; A stale enable-audit-log in the environment does not control
+    ;; persistence or any consumer.
     (-> (flags/parse flags/default extra-flags (:flags config))
         (disj :audit-log))))
 
 (defn persist-audit-events?
-  "True when at least one audit-log consumer is enabled. The result is
-  computed once at boot into `audit-persist?`; event paths read that value
-  instead of checking the flags on every event."
-  [flags]
-  (boolean (some #{:nexus :admin-console} flags)))
+  "Full rows are required by the permanent file-change-refs consumer,
+  independently of external destinations."
+  [_flags]
+  true)
 
 (defn read-env
   [prefix]
@@ -468,6 +467,12 @@
 (defonce ^:dynamic webhooks-enabled? (contains? flags :webhooks))
 (defonce ^:dynamic telemetry-enabled? (contains? flags :telemetry))
 (defonce ^:dynamic error-reporting-enabled? (contains? flags :error-reporting))
+
+(defn fragments-gc-enabled?
+  "Whether new fragment marking is opted in and tiered offload is disabled."
+  []
+  (and (true? (c/get config :fragments-gc-enabled))
+       (not (contains? flags :tiered-file-data-storage))))
 
 (defn validate!
   "Validate the currently loaded configuration data."

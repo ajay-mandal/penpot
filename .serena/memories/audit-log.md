@@ -45,7 +45,8 @@ Attribute the event to the **actor**, not an arbitrary `:profile-id` in the resp
 Put the ids a projection needs in the event so the receiver does not have to join production tables. A create event needs the new entity's id. Supply `:team-id` when the command already has it; for writes the wrapper can resolve it from a project or file id, not a bare `:id`. Reads do not need that lookup. For a bulk operation whose internal calls do not emit, submit one create event per entity when full rows are persisted. Use `audit/submit-create-event` when you have the row or `audit/submit-file-created-event` when you have only a file id; the latter checks that the file exists.
 
 - `add-team-member` reports an actual membership insert, not a conflict that made no change. The emitter submits in the caller's transaction when full rows are persisted. Keep the actor separate from `:member-id` when someone adds another person.
-- `update-file` reports `"saved"`, `"partial"` or `"rejected"`. Only the first two write a change row and carry `:file-change-id`. The id points to the change, not the previous-state snapshot. Read it with `::db/remove-deleted false` because it is born with a future deletion date; even then, GC may already have removed it.
+- `update-file` reports `"saved"`, `"partial"` or `"rejected"`. Only the first two write history and carry `:file-change-id`, the revision of the save. They also carry `:file-change-ids` when there are additional rows: the automatic or auto-repair snapshot, then the extra auto-repair revision if present. The vector excludes the save's own revision. Read history with `::db/remove-deleted false`; even then, GC may already have removed a row.
+- Snapshots made outside `update-file` (manual, restore backup, effective SREPL creation) emit one full-row `file-change-created` with `source = "backend"`, `context = {:initiator "app"}`, and props `{:file-id ..., :file-change-id ...}` (both UUIDs). The snapshot writer emits after its own transaction commits, before restore can try its second transaction. This event has no telemetry shadow or webhook. An audit failure cannot undo the snapshot or prevent restore; an audit event, or its absence, is not a coverage guarantee.
 - For moves, preserve source and destination team ids. For cascades and hard deletes, report the affected ids at emission rather than expecting a projection to reconstruct them later from deleted rows. The `:delete-object` handler emits its cascade event in the same transaction; direct and snapshot cascades do not emit that event.
 - `accept-organization-invitation` distinguishes direct and team invitations with `:organization-member-add-source` and `:belongs-to-team-on-add`. Keep that distinction in props; do not add another origin field.
 
@@ -66,7 +67,9 @@ RPC / management / public ingest
   └─ error reporters (crash events from public ingest; also receive backend logs)
 ```
 
-### Full rows and archive consumers
+### Full rows and their consumers
+
+The local `file-change-refs` consumer (ID `5`) is permanent on writable workers, independently of the marking switch. The web process always persists full rows, even with all external destinations disabled. The consumer only accepts authenticated Penpot backend events (`source = "backend"`, server-owned `context.initiator = "app"`); a name/props match from the browser, telemetry or management ingest is not enough. The cursor transaction enqueues jobs with change IDs, never reads snapshot payloads. A save in the existing buffer is treated like a new one; missing history is repaired only when a fragment GC job detects it. See `mem:backend/storage` for coverage and `operations/fragment-gc.md` for rollout.
 
 Nexus receives full events, not telemetry shadows. Penpot sends Transit with the instance's `public-uri` as `origin` and a Nexus shared key. In the Nexus archive contract, Penpot's `created-at` becomes `received-at`; Nexus has its own `created-at` and `tracked-at` stays the origin time. The default telemetry endpoint also points to Nexus, but it is a separate ingest path with a reduced payload.
 
@@ -76,7 +79,7 @@ The admin-console archive is **Penpot → Nitrate**, distinct from either Nitrat
 
 Webhooks use jobs, not a cursor over the audit buffer. A marked event schedules matching and delivery for the affected team's webhooks. When debounce is configured, a burst delivers the **last payload**, not a list of the events. Delivery failure changes webhook status and its delivery log, not the origin audit row. The audit `webhook` trigger records the match count, including zero, only if full-row persistence is on. Its `:event-id` comes from the producer event, so it can refer back to the full row when that row exists. A telemetry copy has its own id.
 
-With `:error-reporting` on, public ingest forwards `unhandled-exception` and `exception-page` to the reporters even if neither kind of audit row is stored. The database reporter runs on that flag alone; Mattermost also needs its webhook URL. Reporters also receive backend error logs. The browser collector still has to run for browser crashes to reach them. Bound crash reports at the source: a message that embeds a serialized file can exceed the receiver's body limit and prevent later rows in the chunk from advancing. See `mem:frontend/routing-app-shell-subtleties` for frontend report limits and classification.
+With `:error-reporting` on, public ingest also forwards `unhandled-exception` and `exception-page` to the reporters. The database reporter runs on that flag alone; Mattermost also needs its webhook URL. Reporters also receive backend error logs. The browser collector still has to run for browser crashes to reach them. Bound crash reports at the source: a message that embeds a serialized file can exceed the receiver's body limit and prevent later rows in the chunk from advancing. See `mem:frontend/routing-app-shell-subtleties` for frontend report limits and classification.
 
 ### Telemetry shadows
 
@@ -100,7 +103,7 @@ Each chunk sends and advances its cursor in one local transaction. A refusal abo
 
 ### Registration, deletion and replay
 
-The component registers its cursor at `(0, 0)` after configuration succeeds and before its loop starts, so a new consumer replays what remains in the buffer. Consumer ids are stable and never reused: `0` telemetry, `1` Nexus, `2` admin console. A disabled consumer keeps its position until retired. Turning off both full-row consumers stops new full rows; it does not empty the buffer or stop telemetry shadows.
+The component registers its cursor at `(0, 0)` after configuration succeeds and before its loop starts, so a new consumer replays what remains in the buffer. Consumer IDs are stable and never reused: `0` telemetry, `1` Nexus, `2` admin console, `5` file-change-refs. A stopped consumer keeps its position until retired; turning off both archive consumers does not stop local full-row persistence or telemetry shadows.
 
 Only the GC deletes. For full rows it deletes through the oldest registered cursor other than `0`; for shadows it deletes through cursor `0`. A missing cursor leaves its cursor-based path idle. A separate seven-day retention path deletes shadows by age regardless of cursors. It can delete unsent shadows; an older shadow can still ship if the consumer reads it before GC removes it.
 
@@ -116,13 +119,13 @@ The GC reads cursors again for each batch but does not serialize deletion with r
 
 | Setting | Effect |
 |---|---|
-| `:nexus`, `:admin-console` | Start the corresponding archive consumers and enable full-row persistence. Set the intended flags consistently on web and worker instances: each computes persistence at boot. Nexus needs `:nexus-uri`. |
+| `:nexus`, `:admin-console` | Start the corresponding archive consumers, not local persistence. Nexus needs `:nexus-uri`. |
 | `:telemetry` | Collect and ship shadow rows to `:telemetry-uri`, separately from full-row persistence. |
-| `:error-reporting` | Start error reporters and enable public ingest for crash reports without requiring stored audit rows. |
+| `:error-reporting` | Start error reporters and forward crash reports from public ingest. |
 | `:audit-log-gc` | Schedule the GC, on by default. Use `disable-audit-log-gc` during a mixed-version rollout and follow the runbook before restoring it. |
 | `:audit-log-logger` | Log backend audit events, including event data. This is not the archive or a substitute for persistence. |
 
-`:audit-log` is not a configurable flag. As a wire signal it means full-row persistence **or** error reporting. `:telemetry` is a separate wire signal. Public ingest skips processing on a read-only pool or when none of those destinations is enabled.
+`:audit-log` is not a configurable flag. As a wire signal it tells the browser to collect audit events; the permanent consumer makes this signal independent of the archive flags. `:telemetry` is a separate wire signal. Public ingest still skips processing on a read-only pool.
 
 To add a consumer, give it a non-reused id and a transport definition for the shared `run-pass` loop. Configure its `:process`, optional `:prepare` and worker component; do not add producer-specific fan-out or seed its cursor in a migration. For contract tests, drive the real pass with prepared cfg; see `mem:backend/testing` for the test system and stubs. When changing an emitter, assert actor, props and exact emission counts for the specific backend action. Checking only the first matching event misses duplicates. Do not assert exact global counts from best-effort browser collection.
 

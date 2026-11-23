@@ -21,9 +21,12 @@
    [app.features.fdata :as fdata]
    [app.features.file-changes :as fchanges]
    [app.jobs :as jobs]
+   [app.loggers.audit :as audit]
    [app.storage :as sto]
    [app.util.blob :as blob]
-   [cuerdas.core :as str]))
+   [cuerdas.core :as str])
+  (:import
+   java.sql.Connection))
 
 (def sql:snapshots
   "SELECT c.id,
@@ -235,15 +238,31 @@
    [:label {:optional true} ::sm/text]
    [:session-id {:optional true} ::sm/uuid]
    [:modified-at {:optional true} ::ct/inst]
-   [:deleted-at {:optional true} ::ct/inst]])
+   [:deleted-at {:optional true} ::ct/inst]
+   [::audit-via-update-file {:optional true} :boolean]])
 
 (def ^:private check-create-params
   (sm/check-fn schema:create-params))
 
-(defn create!
-  "Create a file snapshot; expects a non-encoded file"
-  [cfg file & {:as params}]
-  (let [{:keys [label created-by deleted-at profile-id session-id]}
+(defn- emit-snapshot-created-after-commit
+  [{:keys [::db/conn ::db/pool]} file-id snapshot-id profile-id]
+  (db/after-commit
+   (fn []
+     ;; A pool-owned transaction has already returned its connection.
+     ;; A caller-owned connection is still available for the audit write.
+     (audit/insert (if (.isClosed ^Connection conn)
+                     {::db/pool pool}
+                     {::db/conn conn})
+                   {:name "file-change-created"
+                    :type "action"
+                    :source "backend"
+                    :profile-id profile-id
+                    :props {:file-id file-id :file-change-id snapshot-id}
+                    :context {:initiator "app"}}))))
+
+(defn- create-snapshot
+  [cfg file params]
+  (let [{:keys [label created-by deleted-at profile-id session-id ::audit-via-update-file]}
         (check-create-params params)
 
         file
@@ -305,7 +324,16 @@
                     :created-at created-at
                     :deleted-at deleted-at})
 
+    (when (and cf/audit-persist? (not audit-via-update-file))
+      (emit-snapshot-created-after-commit cfg (:id file) snapshot-id profile-id))
+
     snapshot))
+
+(defn create!
+  "Create a file snapshot; expects a non-encoded file. When the caller is
+   update-file, it reports the new ID in its own audit event."
+  [cfg file & {:as params}]
+  (db/tx-run! cfg create-snapshot file params))
 
 (def ^:private schema:update-params
   [:map {:title "SnapshotUpdateParams"}
