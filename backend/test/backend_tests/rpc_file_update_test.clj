@@ -13,7 +13,6 @@
    [app.common.logging :as l]
    [app.common.uuid :as uuid]
    [app.config :as cf]
-   [app.db :as db]
    [app.loggers.audit :as-alias audit]
    [app.msgbus :as mbus]
    [app.rpc :as-alias rpc]
@@ -167,19 +166,12 @@
                                         params)))
         props (fn [out] (::audit/replace-props (meta out)))]
 
-    (t/testing "a save reports its revision and the snapshot writer reports the snapshot"
-      (let [out      (th/with-audit-config (conj cf/flags :nexus)
-                       (save! {:revn 0
-                               :changes [(th/add-rect-change page-id shape)]}))
-            id       (:file-change-id (props out))
-            snapshot (th/db-get :file-change {:file-id file-id :label "internal/snapshot/0"}
-                                {::db/remove-deleted false})]
+    (t/testing "a save that writes the revision carries its id"
+      (let [out (save! {:revn 0
+                        :changes [(th/add-rect-change page-id shape)]})
+            id  (:file-change-id (props out))]
         (t/is (uuid? id))
         (t/is (= [id] (mapv :id (th/db-query :file-change {:id id}))))
-        (t/is (uuid? (:id snapshot)))
-        (t/is (= [{:file-id file-id :file-change-id (:id snapshot)}]
-                 (mapv (comp db/decode-transit-pgobject :props)
-                       (th/db-query :audit-log {:name "file-change-created"}))))
         (t/is (= "saved" (:outcome (props out))))
         (t/is (inst? (:modified-at (props out))))))
 
@@ -192,7 +184,6 @@
         (t/is (= 1 (:revn (th/db-get :file {:id file-id}))))
         (t/is (= 1 (count (get-file-changes ctx))))
         (t/is (not (contains? (props out) :file-change-id)))
-        (t/is (= 1 (count (th/db-query :audit-log {:name "file-change-created"}))))
         (t/is (= "rejected" (:outcome (props out))))
         ;; The rejected save does not persist: the event mirrors the row.
         (t/is (= (inst-ms (:modified-at (th/db-get :file {:id file-id})))

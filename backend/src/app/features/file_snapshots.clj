@@ -21,12 +21,9 @@
    [app.features.fdata :as fdata]
    [app.features.file-changes :as fchanges]
    [app.jobs :as jobs]
-   [app.loggers.audit :as audit]
    [app.storage :as sto]
    [app.util.blob :as blob]
-   [cuerdas.core :as str])
-  (:import
-   java.sql.Connection))
+   [cuerdas.core :as str]))
 
 (def sql:snapshots
   "SELECT c.id,
@@ -243,24 +240,9 @@
 (def ^:private check-create-params
   (sm/check-fn schema:create-params))
 
-(defn- emit-snapshot-created-after-commit
-  [{:keys [::db/conn ::db/pool]} file-id snapshot-id profile-id]
-  (db/after-commit
-   (fn []
-     ;; A pool-owned transaction has already returned its connection.
-     ;; A caller-owned connection is still available for the audit write.
-     (audit/insert (if (.isClosed ^Connection conn)
-                     {::db/pool pool}
-                     {::db/conn conn})
-                   {:name "file-change-created"
-                    :type "action"
-                    :source "backend"
-                    :profile-id profile-id
-                    :props {:file-id file-id :file-change-id snapshot-id}
-                    :context {:initiator "app"}}))))
-
-(defn- create-snapshot
-  [cfg file params]
+(defn create!
+  "Create a file snapshot; expects a non-encoded file"
+  [cfg file & {:as params}]
   (let [{:keys [label created-by deleted-at profile-id session-id]}
         (check-create-params params)
 
@@ -323,15 +305,7 @@
                     :created-at created-at
                     :deleted-at deleted-at})
 
-    (when cf/audit-persist?
-      (emit-snapshot-created-after-commit cfg (:id file) snapshot-id profile-id))
-
     snapshot))
-
-(defn create!
-  "Create a file snapshot from a non-encoded file and report it after commit."
-  [cfg file & {:as params}]
-  (db/tx-run! cfg create-snapshot file params))
 
 (def ^:private schema:update-params
   [:map {:title "SnapshotUpdateParams"}

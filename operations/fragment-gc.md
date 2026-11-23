@@ -11,6 +11,9 @@ offload do not change.
    Do not reset another consumer's cursor. Stop old runners on the shared
    queue before starting the first worker that can enqueue the new jobs.
    Ensure old web writers are also gone before evaluating the marking gates.
+   If a test environment ran the earlier two-job implementation, drain
+   those jobs on that build before switching: the index job now accepts
+   only `file-id`, and there is no separate repair job.
 2. Apply `0160-add-file-change-refs`. It creates an empty partitioned table
    and a foreign key to `file_change`; there is no global backfill. The
    foreign key takes a lock on the referenced table. If the normal migration
@@ -22,13 +25,21 @@ offload do not change.
    the buffer until it comes back. Do not delete the cursor to catch up.
 
 The ordinary replay processes events still in the buffer. It does not
-reconstruct purged events. A save reports its own revision and the common
-snapshot writer reports each snapshot separately after commit. Other
-history entries, such as the extra auto-repair revision, are indexed on
-demand: once marking is enabled, a GC job that finds an unindexed change
-repairs the missing rows in batches and tries again.
-Corrupt or unreadable snapshots leave that file uncovered; check the failed
-job and source data rather than filling in an empty array.
+reconstruct purged events. The existing RPC events for an effective save
+or manual snapshot enqueue one pending `index-file-change-refs` job per
+file. Each run fills the missing rows in pages of 32, including other
+retained history that did not emit an event. A running job does not stop
+a later event from enqueuing new work; a file with no trigger is not
+backfilled.
+
+Only effective saves trigger fragment GC. If a GC run finds missing rows,
+it does not mark anything: it enqueues the same index job and uses the
+worker's retry budget with a one-minute base delay. It checks coverage again
+on each attempt. If retries run out before indexing finishes, a later
+save can trigger GC again. An unreadable snapshot stays uncovered, but
+does not stop the index job from filling other rows before it requests a
+retry. Check the failed job and source data rather than filling in an
+empty array.
 
 ## Before enabling marking
 
@@ -44,6 +55,9 @@ job and source data rather than filling in an empty array.
   producer can queue more offload jobs. The job gate also checks active
   offload rows for its tenant before the GC can acquire a file lock.
 - Test the bundle followed by a fragment GET without a cached response.
+  Measure index job latency and database load during replay and on files
+  with long histories: the page size bounds the missing rows returned, not
+  the rows PostgreSQL reads to find them.
   Measure `update-file` p95/p99 and the time spent waiting for locks under
   concurrent editing on representative long histories. Compare against
   the same workload with the legacy GC. Agree on the latency budget before

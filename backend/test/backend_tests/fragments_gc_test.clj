@@ -6,6 +6,7 @@
 
 (ns backend-tests.fragments-gc-test
   (:require
+   [app.common.exceptions :as ex]
    [app.common.time :as ct]
    [app.common.uuid :as uuid]
    [app.config :as cf]
@@ -15,6 +16,7 @@
    [app.tasks.fragments-gc :as gc]
    [app.util.blob :as blob]
    [app.util.pointer-map :as pmap]
+   [app.worker :as wrk]
    [backend-tests.helpers :as th]
    [clojure.test :as t]))
 
@@ -86,19 +88,25 @@
     (t/is (not (marked? id history-ref)))
     (t/is (empty? (get-jobs "fragments-gc")))))
 
-(t/deftest missing-revision-refs-queue-repair-without-marking
-  (let [{:keys [id revn]} (fixture-file)
-        orphan (fragment id)]
-    (th/db-insert! :file-change {:id (uuid/next) :file-id id :revn revn})
+(t/deftest missing-refs-queue-the-same-index-job-and-retry-without-marking
+  (let [{:keys [id] :as file} (fixture-file)
+        orphan      (fragment id)
+        history-ref (fragment id)]
+    (db/tx-run! th/*system* insert-snapshot file (uuid/next) history-ref)
     (binding [cf/config (assoc cf/config :fragments-gc-enabled true)]
-      (run-gc id)
+      (dotimes [_ 2]
+        (let [failure (ex/try! (run-gc id))]
+          (t/is (= ::wrk/retry (:type (ex-data failure))))
+          (t/is (= :incomplete-file-change-refs (:code (ex-data failure))))
+          (t/is (= (ct/duration "1m") (:delay (ex-data failure))))))
       (t/is (not (marked? id orphan)))
-      (t/is (= 1 (count (get-jobs "repair-file-change-refs"))))
-      (th/run-task! :repair-file-change-refs {:file-id id})
+      (t/is (= 1 (count (get-jobs "index-file-change-refs"))))
+      (th/run-task! :index-file-change-refs {:file-id id})
       (t/is (empty? (refs/get-missing-change-ids th/*system* id 1)))
-      (t/is (= 1 (count (get-jobs "fragments-gc"))))
+      (t/is (empty? (get-jobs "fragments-gc")))
       (run-gc id))
-    (t/is (marked? id orphan))))
+    (t/is (marked? id orphan))
+    (t/is (not (marked? id history-ref)))))
 
 (t/deftest a-snapshot-committed-between-preparation-and-file-lock-invalidates-the-lot
   (let [{:keys [id] :as file} (fixture-file)

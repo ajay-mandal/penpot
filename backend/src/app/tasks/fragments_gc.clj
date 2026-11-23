@@ -18,12 +18,15 @@
    [app.jobs :as jobs]
    [app.metrics :as mtx]
    [app.storage :as sto]
+   [app.tasks.file-change-refs :as index]
    [app.util.pointer-map :as pmap]
+   [app.worker :as wrk]
    [integrant.core :as ig]))
 
 (def ^:private lot-size 100)
 (def ^:private preparation-size 1000)
 (def ^:private retry-delay (ct/duration {:seconds 30}))
+(def ^:private coverage-retry-delay (ct/duration "1m"))
 
 (def ^:private sql:offload-pending
   "SELECT EXISTS (
@@ -189,8 +192,8 @@
           (partition-all lot-size ids)))
 
 (defn- schedule
-  [cfg name file-id delay]
-  (jobs/submit cfg {::jobs/name name
+  [cfg file-id delay]
+  (jobs/submit cfg {::jobs/name :fragments-gc
                     ::jobs/params {:file-id file-id}
                     ::jobs/label (str file-id)
                     ::jobs/dedupe true
@@ -206,14 +209,20 @@
                    (mark-prepared cfg file-id lot)
                    lot)]
       (case (:status result)
-        :incomplete (schedule cfg :repair-file-change-refs file-id 0)
+        :incomplete (do
+                      (index/schedule-index cfg file-id)
+                      (ex/raise :type ::wrk/retry
+                                :code :incomplete-file-change-refs
+                                :hint "file change references are not fully indexed"
+                                :file-id file-id
+                                :delay coverage-retry-delay))
         :recent     (let [now   (ct/now)
                           until (:deadline result)]
-                      (schedule cfg :fragments-gc file-id
+                      (schedule cfg file-id
                                 (if (ct/is-after? until now) (ct/diff now until) 0)))
-        (:stale :busy) (schedule cfg :fragments-gc file-id retry-delay)
+        (:stale :busy) (schedule cfg file-id retry-delay)
         :complete     (when (= preparation-size (count (:ids lot)))
-                        (schedule cfg :fragments-gc file-id 0))
+                        (schedule cfg file-id 0))
         nil)
       (dissoc result :deadline))))
 

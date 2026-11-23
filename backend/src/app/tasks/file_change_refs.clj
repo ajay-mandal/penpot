@@ -14,93 +14,78 @@
    [app.jobs :as jobs]
    [app.metrics :as mtx]
    [app.storage :as sto]
-   [app.tasks.fragments-gc :as fragments-gc]
    [app.worker :as wrk]
-   [integrant.core :as ig]))
+   [integrant.core :as ig])
+  (:import
+   java.sql.SQLException))
 
-(def max-change-ids 128)
-(def ^:private repair-batch-size 32)
+(def ^:private batch-size 32)
 (def ^:private retry-delay (ct/duration "1m"))
 
-(defn- index-changes
-  [cfg file-id change-ids]
-  (doseq [change-id change-ids]
-    (jobs/heartbeat cfg)
-    (try
-      ;; No batch transaction: each publication commits independently and
-      ;; the next attempt can reuse every successfully indexed change.
-      (refs/index-change cfg file-id change-id)
-      (catch InterruptedException cause
-        (throw cause))
-      (catch Exception cause
-        (let [{:keys [type code hint]} (ex-data cause)]
-          (when (= :interrupt type)
-            (throw cause))
-          (ex/raise :type ::wrk/retry
-                    :code (or code :file-change-index-failed)
-                    :hint (or hint "unable to index file change references")
-                    :file-id file-id
-                    :change-id change-id
-                    :delay retry-delay
-                    :cause cause))))))
-
-(defn execute-index-file-change-refs
-  "Index explicit changes from one file, without any GC or cursor work."
-  [cfg {:keys [file-id change-ids]}]
-  (index-changes cfg file-id (distinct change-ids)))
-
-(defn- submit-continuation
-  [cfg job-name file-id]
-  ;; Only an existing new job can cover this submission: a running or
-  ;; retrying job may have finished reading the state it acts on.
-  (jobs/submit cfg {::jobs/name job-name
+(defn schedule-index
+  "Coalesce pending requests, but let a running scan get a successor."
+  [cfg file-id]
+  (jobs/submit cfg {::jobs/name :index-file-change-refs
                     ::jobs/params {:file-id file-id}
                     ::jobs/label (str file-id)
                     ::jobs/dedupe true}))
 
-(defn- continue-repair
-  [cfg file-id]
-  (if (seq (refs/get-missing-change-ids cfg file-id 1))
-    (submit-continuation cfg :repair-file-change-refs file-id)
-    (when (fragments-gc/marking-enabled? cfg)
-      (submit-continuation cfg :fragments-gc file-id))))
+(defn- retry-index
+  [file-id change-id cause]
+  (let [{:keys [code hint]} (ex-data cause)]
+    (ex/raise :type ::wrk/retry
+              :code (or code :file-change-index-failed)
+              :hint (or hint "unable to index file change references")
+              :file-id file-id
+              :change-id change-id
+              :delay retry-delay
+              :cause cause)))
 
-(defn execute-repair-file-change-refs
-  "Index one batch of missing changes, then schedule repair or GC from
-  the final coverage check's transaction. An unreadable source stops the
-  batch and leaves the job runner to retry; no GC is scheduled on failure."
+(defn- index-changes
+  [cfg file-id first-failure change-ids]
+  (reduce (fn [failure change-id]
+            (jobs/heartbeat cfg)
+            (try
+              ;; Each publication commits independently. Keep the first
+              ;; unreadable payload as a cause for retry, but index the rest.
+              (refs/index-change cfg file-id change-id)
+              failure
+              (catch InterruptedException cause
+                (throw cause))
+              (catch SQLException cause
+                (retry-index file-id change-id cause))
+              (catch Exception cause
+                (when (= :interrupt (:type (ex-data cause)))
+                  (throw cause))
+                (or failure [change-id cause]))))
+          first-failure
+          change-ids))
+
+(defn execute-index-file-change-refs
+  "Fill missing index rows in bounded pages. A later event can enqueue a
+  new scan for changes committed after this scan passed their IDs."
   [cfg {:keys [file-id]}]
-  (let [change-ids (refs/get-missing-change-ids cfg file-id repair-batch-size)]
-    (index-changes cfg file-id change-ids)
-    (jobs/heartbeat cfg)
-    (db/tx-run! cfg continue-repair file-id))
-  nil)
+  (loop [after-id nil
+         failure  nil]
+    (let [change-ids (refs/get-missing-change-ids cfg file-id batch-size :after-id after-id)
+          failure    (index-changes cfg file-id failure change-ids)]
+      (if (= batch-size (count change-ids))
+        (recur (peek change-ids) failure)
+        (when-let [[change-id cause] failure]
+          (retry-index file-id change-id cause))))))
 
-(def schema:index-params
-  [:map {:closed true}
-   [:file-id ::sm/uuid]
-   [:change-ids [:vector {:max max-change-ids} ::sm/uuid]]])
-
-(def schema:repair-params
+(def ^:private schema:params
   [:map {:closed true}
    [:file-id ::sm/uuid]])
 
 (def ^:private valid-config?
   (sm/validator [:map ::db/pool ::mtx/metrics ::sto/storage]))
 
-(defn- make-job-def
-  [cfg job-name schema handler]
+(defmethod ig/init-key ::job-def
+  [_ cfg]
   (assert (valid-config? cfg) "expected a database pool, metrics, and storage")
-  {::jobs/name      job-name
-   ::jobs/schema    schema
-   ::jobs/handler   (fn [_context params] (handler cfg params))
-   ::jobs/decoder   (sm/decoder schema sm/json-transformer)
-   ::jobs/validator (sm/validator schema)})
-
-(defmethod ig/init-key ::index-job-def
-  [_ cfg]
-  (make-job-def cfg :index-file-change-refs schema:index-params execute-index-file-change-refs))
-
-(defmethod ig/init-key ::repair-job-def
-  [_ cfg]
-  (make-job-def cfg :repair-file-change-refs schema:repair-params execute-repair-file-change-refs))
+  {::jobs/name      :index-file-change-refs
+   ::jobs/schema    schema:params
+   ::jobs/handler   (fn [_context params] (execute-index-file-change-refs cfg params))
+   ::jobs/decoder   (sm/decoder schema:params sm/json-transformer)
+   ::jobs/validator (sm/validator schema:params)})

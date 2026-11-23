@@ -19,23 +19,20 @@
   [row]
   (when (= "backend" (:source row))
     (let [{:keys [name props context]} (consumers/decode-row row)
-          {:keys [file-change-id outcome]} props]
+          {:keys [outcome]} props]
       ;; Management ingest also uses source "backend", but the server
       ;; stamps its authenticated shared-key identity as initiator.
       (when (= "app" (:initiator context))
         (case name
           "update-file"
           (when (and (uuid? (:id props))
-                     (uuid? file-change-id)
                      (contains? #{"saved" "partial"} outcome))
             {:file-id (:id props)
-             :save true
-             :change-id file-change-id})
+             :save true})
 
-          "file-change-created"
-          (when (and (uuid? (:file-id props)) (uuid? file-change-id))
-            {:file-id (:file-id props)
-             :change-id file-change-id})
+          "create-file-snapshot"
+          (when (uuid? (:file-id props))
+            {:file-id (:file-id props)})
 
           nil)))))
 
@@ -45,10 +42,8 @@
         saves (into #{} (comp (filter :save) (map :file-id)) work)]
     ;; Do not resolve snapshot payloads while the transaction owns the
     ;; cursor. Its only writes are durable work and the cursor itself.
-    (doseq [[file-id entries] (group-by :file-id work)
-            ids (partition-all refs/max-change-ids (distinct (map :change-id entries)))]
-      (jobs/submit cfg {::jobs/name :index-file-change-refs
-                        ::jobs/params {:file-id file-id :change-ids (vec ids)}}))
+    (doseq [file-id (into #{} (map :file-id) work)]
+      (refs/schedule-index cfg file-id))
     (when (and (seq saves) (fragments-gc/marking-enabled? cfg))
       (doseq [file-id saves]
         (jobs/submit cfg {::jobs/name :fragments-gc
